@@ -4,7 +4,7 @@ import time
 import json
 import base64
 from psycopg2.extras import Json
-from datetime import datetime
+from datetime import datetime, timedelta
 import logging
 from slack_sdk import WebClient
 from slack_sdk.oauth import InstallationStore
@@ -12,7 +12,6 @@ from slack_sdk.oauth.installation_store.models.installation import Installation
 from slack_bolt.authorization import AuthorizeResult
 from flask_talisman import Talisman
 from flask import Flask, request, jsonify, render_template
-from slack_sdk import WebClient
 from slack_sdk.errors import SlackApiError
 from slack_bolt import App
 from slack_bolt.adapter.flask import SlackRequestHandler
@@ -25,11 +24,10 @@ from googleapiclient.discovery import build
 from flask_session import Session
 from msal import ConfidentialClientApplication
 import psycopg2
-from datetime import datetime, timedelta
 from collections import defaultdict
 import hashlib
 import re
-import logging
+import requests
 from threading import Lock
 from urllib.parse import quote_plus
 from langchain.chains import LLMChain
@@ -38,7 +36,7 @@ from agents.all_agents import (
     create_schedule_agent, create_update_agent, create_delete_agent, llm,
     create_schedule_group_agent, create_update_group_agent, create_schedule_channel_agent
 )
-from all_tools import tools, calendar_prompt_tools
+from all_tools import tools
 from db import init_db
 
 # Load environment variables
@@ -59,24 +57,10 @@ SLACK_CLIENT_ID = os.getenv('SLACK_CLIENT_ID', '')
 SLACK_CLIENT_SECRET = os.getenv('SLACK_CLIENT_SECRET', '')
 SLACK_SIGNING_SECRET = os.getenv('SLACK_SIGNING_SECRET', '')
 SLACK_SCOPES = [
-    "app_mentions:read",
-    "channels:history",
-    "chat:write",
-    "users:read",
-    "im:write",
-    "groups:write",
-    "mpim:write",
-    "commands",
-    "team:read",
-    "channels:read",
-    "groups:read",
-    "im:read",
-    "mpim:read",
-    "groups:history",
-    "im:history",
-    "mpim:history"
+    "app_mentions:read", "channels:history", "chat:write", "users:read", "im:write",
+    "groups:write", "mpim:write", "commands", "team:read", "channels:read",
+    "groups:read", "im:read", "mpim:read", "groups:history", "im:history", "mpim:history"
 ]
-import requests
 SLACK_BOT_USER_ID = os.getenv("SLACK_BOT_USER_ID")
 ZOOM_REDIRECT_URI = "https://clear-muskox-grand.ngrok-free.app/zoom_callback"
 CLIENT_ID = "FiyFvBUSSeeXwjDv0tqg"  # Zoom Client ID
@@ -264,37 +248,39 @@ SCOPES = [
 # Initialize Neon Postgres database
 init_db()
 
-# State Management Classes
-class StateManager:
-    def __init__(self):
-        self._states = {}
-        self._lock = Lock()
+# OAuth State Management Functions
+def create_oauth_state(team_id, user_id):
+    state_token = secrets.token_urlsafe(32)
+    with psycopg2.connect(os.getenv('DATABASE_URL')) as conn:
+        with conn.cursor() as cur:
+            cur.execute('''
+                INSERT INTO OAuthStates (team_id, user_id, state_token, created_at, used)
+                VALUES (%s, %s, %s, %s, %s)
+            ''', (team_id, user_id, state_token, datetime.now(), False))
+            conn.commit()
+    return state_token
 
-    def create_state(self, user_id):
-        with self._lock:
-            state_token = secrets.token_urlsafe(32)
-            self._states[state_token] = {"user_id": user_id, "timestamp": datetime.now(), "used": False}
-            return state_token
-
-    def validate_and_consume_state(self, state_token):
-        with self._lock:
-            if state_token not in self._states:
-                return None
-            state_data = self._states[state_token]
-            if state_data["used"] or (datetime.now() - state_data["timestamp"]).total_seconds() > 600:
-                del self._states[state_token]
-                return None
-            state_data["used"] = True
-            return state_data["user_id"]
-
-    def cleanup_expired_states(self):
-        with self._lock:
-            current_time = datetime.now()
-            expired = [s for s, d in self._states.items() if (current_time - d["timestamp"]).total_seconds() > 600]
-            for state in expired:
-                del self._states[state]
-
-state_manager = StateManager()
+def validate_and_consume_oauth_state(state_token):
+    with psycopg2.connect(os.getenv('DATABASE_URL')) as conn:
+        with conn.cursor() as cur:
+            # Clean up expired states (older than 10 minutes)
+            cur.execute('''
+                DELETE FROM OAuthStates WHERE created_at < %s
+            ''', (datetime.now() - timedelta(minutes=10),))
+            conn.commit()
+            # Validate and consume the state
+            cur.execute('''
+                SELECT team_id, user_id FROM OAuthStates WHERE state_token = %s AND used = FALSE
+            ''', (state_token,))
+            row = cur.fetchone()
+            if row:
+                team_id, user_id = row
+                cur.execute('''
+                    UPDATE OAuthStates SET used = TRUE WHERE state_token = %s
+                ''', (state_token,))
+                conn.commit()
+                return team_id, user_id
+            return None, None
 
 class EventDeduplicator:
     def __init__(self, expiration_minutes=5):
@@ -727,8 +713,7 @@ def handle_gcal_config(ack, body, client, logger):
     if user_id != owner_id:
         client.chat_postMessage(channel=user_id, text="Only the workspace owner can configure the calendar.")
         return
-    state = state_manager.create_state(owner_id)
-    print(f"state stored: {state}")
+    state = create_oauth_state(team_id, owner_id)
     flow = Flow.from_client_secrets_file('credentials.json', scopes=SCOPES, redirect_uri=OAUTH_REDIRECT_URI)
     auth_url, _ = flow.authorization_url(
         access_type='offline',
@@ -762,7 +747,7 @@ def handle_mscal_config(ack, body, client, logger):
         client.chat_postMessage(channel=user_id, text="Only the workspace owner can configure the calendar.")
         return
     msal_app = ConfidentialClientApplication(MICROSOFT_CLIENT_ID, authority=MICROSOFT_AUTHORITY, client_credential=MICROSOFT_CLIENT_SECRET)
-    state = state_manager.create_state(owner_id)
+    state = create_oauth_state(team_id, owner_id)
     auth_url = msal_app.get_authorization_request_url(scopes=MICROSOFT_SCOPES, redirect_uri=MICROSOFT_REDIRECT_URI, state=state)
     try:
         client.views_open(
@@ -802,9 +787,7 @@ def handle_mentions(event, say, client, context):
         logger.error(f"No bot_user_id found for team {team_id}")
         say("Error: Could not determine bot user ID.", thread_ts=thread_ts)
         return
-    print(f"App mention events")
     bot_user_id = installation.bot_user_id
-    print(f"Bot user id: {bot_user_id}")
     mention = f"<@{bot_user_id}>"
     mentions = list(set(re.findall(r'<@(\w+)>', text)))
     if bot_user_id in mentions:
@@ -823,7 +806,6 @@ def handle_mentions(event, say, client, context):
                       for uid in relevant_user_ids}
     user_information = "\n".join([f"{uid}: Name={info['real_name']}, Email={info['email']}, Slack Name={info['name']}"
                                   for uid, info in relevant_users.items() if uid != bot_user_id])
-    print(f"User Information: {user_information}\n\nRelevant Users: {relevant_user_ids}\n\n All users: {all_users}")
     mentioned_users_output = mentioned_users_chain.run({"user_information": user_information, "chat_history": channel_history, "current_input": text, 'bob_id': bot_user_id})
     import pytz
     pst = pytz.timezone('America/Los_Angeles')
@@ -845,7 +827,6 @@ def handle_mentions(event, say, client, context):
         return
     calendar_formatting_chain = LLMChain(llm=llm, prompt=calender_prompt)
     output = calendar_formatting_chain.run({'input': calendar_events, 'admin_id': workspace_owner_id, 'date_time': formatted_time})
-    print(f"MENTIONED USERS:{mentioned_users_output}")
     agent_input = {
         'input': f"Here is the input by user: {text} and do not mention <@{bot_user_id}> even tho mentioned in history",
         'event_details': str(event),
@@ -963,7 +944,6 @@ def handle_messages(body, say, client, context):
     if not calendar_tool or calendar_tool == "none":
         say("The workspace owner has not configured a calendar yet.", thread_ts=thread_ts)
         return
-    print(f"Message events")
     workspace_owner_id = get_workspace_owner_id(client, team_id)
     is_owner = user_id == workspace_owner_id
     timezone = get_user_timezone(client, user_id)
@@ -1014,14 +994,12 @@ def handle_messages(body, say, client, context):
                       for uid in relevant_user_ids}
     user_information = "\n".join([f"{uid}: Name={info['real_name']}, Email={info['email']}, Slack Name={info['name']}"
                                   for uid, info in relevant_users.items() if uid != bot_user_id])
-    print(f"All users: {all_users}\n\n Relevant users: {relevant_user_ids}")
     mentioned_users_output = mentioned_users_chain.run({"user_information": user_information, "chat_history": channel_history, "current_input": text, 'bob_id': bot_user_id})
     schedule_exec = create_schedule_agent(schedule_tools)
     update_exec = create_update_agent(update_tools)
     delete_exec = create_delete_agent(delete_tools)
     schedule_group_exec = create_schedule_group_agent(schedule_tools)
     update_group_exec = create_update_group_agent(update_tools)
-    print(f"MENTIONED USERS:{mentioned_users_output}")
     channel_type = channel.get("is_group", False) or channel.get("is_mpim", False)
     agent_input = {
         'input': f"Here is the input by user: {text} and do not mention <@{bot_user_id}> even tho mentioned in history",
@@ -1171,14 +1149,9 @@ def slack_oauth_redirect():
 @app.route("/oauth2callback")
 def oauth2callback():
     state = request.args.get('state', '')
-    print(f"STATE: {state}")
-    print(f"STATs: {state_manager._states}")
-    user_id = state_manager.validate_and_consume_state(state)
+    team_id, user_id = validate_and_consume_oauth_state(state)
     if not user_id:
         return "Invalid state", 400
-    team_id = get_team_id_from_owner_id(user_id)
-    if not team_id:
-        return "Workspace not found", 404
     client = get_client_for_team(team_id)
     if not client:
         return "Client not found", 500
@@ -1205,12 +1178,9 @@ def microsoft_callback():
     state = request.args.get("state")
     if not code or not state:
         return "Missing parameters", 400
-    user_id = state_manager.validate_and_consume_state(state)
+    team_id, user_id = validate_and_consume_oauth_state(state)
     if not user_id:
         return "Invalid or expired state parameter", 403
-    team_id = get_team_id_from_owner_id(user_id)
-    if not team_id:
-        return "Workspace not found", 404
     client = get_client_for_team(team_id)
     if not client:
         return "Client not found", 500
@@ -1221,7 +1191,7 @@ def microsoft_callback():
     if "access_token" not in result:
         return "Authentication failed", 400
     token_data = {"access_token": result["access_token"], "refresh_token": result.get("refresh_token", ""), "expires_at": result["expires_in"] + time.time()}
-    save_token(user_id, 'microsoft', token_data)
+    save_token(team_id, user_id, 'microsoft', token_data)
     client.views_publish(user_id=user_id, view=create_home_tab(client, team_id, user_id))
     return "Microsoft Calendar connected successfully! You can close this window."
 
@@ -1229,12 +1199,9 @@ def microsoft_callback():
 def zoom_callback():
     code = request.args.get("code")
     state = request.args.get("state")
-    user_id = state_manager.validate_and_consume_state(state)
+    team_id, user_id = validate_and_consume_oauth_state(state)
     if not user_id:
         return "Invalid or expired state", 403
-    team_id = get_team_id_from_owner_id(user_id)
-    if not team_id:
-        return "Workspace not found", 404
     client = get_client_for_team(team_id)
     if not client:
         return "Client not found", 500
@@ -1318,7 +1285,7 @@ def handle_zoom_config(ack, body, client, logger):
         return
     zoom_token = load_token(team_id, owner_id, "zoom")
     is_refresh = zoom_token is not None
-    state = state_manager.create_state(owner_id)
+    state = create_oauth_state(team_id, owner_id)
     auth_url = f"{ZOOM_OAUTH_AUTHORIZE_API}?response_type=code&client_id={CLIENT_ID}&redirect_uri={quote_plus(ZOOM_REDIRECT_URI)}&state={state}"
     modal_title = "Refresh Zoom Token" if is_refresh else "Authenticate with Zoom"
     button_text = "Refresh Zoom Token" if is_refresh else "Authenticate with Zoom"
@@ -1376,4 +1343,4 @@ def home():
 
 port = int(os.getenv('PORT', 10000))
 if __name__ == '__main__':
-    app.run()
+    app.run(port=port)
