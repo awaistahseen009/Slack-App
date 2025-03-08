@@ -47,76 +47,6 @@ FINAL OUTPUT: Formatted slots in given format and dont include any step details 
 """)
 
 
-
-# schedule_prompt = ChatPromptTemplate.from_template("""
-# <SYSTEM>:
-# You are a meeting scheduling assistant. Your task is to help the user schedule a meeting by finding available time slots, coordinating with participants, and creating the meeting event in the calendar.
-# <TOOLS>: Be Precise in using the tools and use it only once
-# {{tools}}
-# <CURRENT DATE AND TIME>
-# {date_time}
-# <TASK>:
-# Based on the user's request, use the appropriate tools to schedule the meeting. Check calendar availability, send direct messages to coordinate, and create the event.
-# <STEPS>
-# 1. You will be given the formatted current events of the calendar.
-# 2. Send  the schedule by mentioning all the mentioned user s and ask for their preferences.                                                                                            
-# 3. Note that there can be multiple users mentioned in the meeting text and if one user replies about a timing then also mention other users and ask if they are comfortable with this time or not.
-#     3.1: If all user agrees then schedule the meeting in the calendar
-#                                                                                                                         3.2 If even one of them disagrees then go to step 2.1 and send the sames slots mentioning the disagreement and keep performing this step until the consensus is reached and all mentioned user are agreed on one time
-#     3.3 You can keep track for yourself, lets say we have 3 users U1 , U2 and U3, you can check the users U1 has agreed , U2 has agreed but U3 didnt so again send the timetable but already prepared one so dont use the tool again just the history and mention that U3 have the clash so pick another time from the slots.
-                                                                                                                                                            
-# 4. After resolving the conflict you must call the tool to register the event in the calendar.
-#     4.1: You should include the summary of the event like who are included in the meeting
-#     4.2: You should include the email addresses of the mentioned users which you can access from the <USERS INFORMATION>.                                                                                                   
-
-# 5. Finally if meeting is registered in the calendar then send the direct message to each of the attendee/ mentioned users about confirming the meeting schedule and again you can access the user information from the <USERS INFORMATION>
-# - To send the dm to single mentioned user: send_direct_dm and pass the slack user id of the receiver i.e user_id =  'UC3472938'
-# - To send the dm to multiple mentioned users use this tool:  send_multiple_dms and user slacks id will be passed as list to this tool  i.e   user_ids = ['UA263487', 'UB8984234']                                                                                               
- 
-#                                                                                                                                                  ------------------------------------                                                                                YOUR WORK STARTS FROM HERE.                 
-# <INPUT>:
-# {input}
-# <CHANNEL HISTORY(PREVIOUS MESSAGES FOR CONTEXT)>:
-# {channel_history}
-# - If a new message is sent or received related to new schedule of meeting then ignore old responses
-# - Always analyze the latest history and in context to new messages                                                                                                       
-# <EVENTS FROM THE CALENDAR>
-# "Hello <@mentioned_users>,
-# <@{admin}> wants to schedule a meeting with you. Here are their available time slots:
-# {formatted_calendar} Which slot suits for you best "                                                  
-# <USERS INFORMATION>:
-# {user_information}
-
-# <CALENDAR TOOL>:
-# {calendar_tool}                                                   
-# <EVENT DETAILS TO REGISTER IN THE CALENDAR>:
-# {event_details}
-
-# <TARGET USER ID>:
-# {target_user_id}
-
-# <TIMEZONE>:
-# {timezone}
-
-# <USER ID>:
-# {user_id}
-
-# <ADMIN SLACK ID>:
-# {admin}
-
-# <ZOOM LINK>:
-# {zoom_link}
-
-# <ZOOM MODE>:
-# {zoom_mode}
-
-
-# <AGENT SCRATCHPAD>:
-# {agent_scratchpad}
-
-# <OUTPUT>:
-# Provide a confirmation message after scheduling, e.g., "Meeting scheduled successfully."
-# """)
 from langchain.prompts import ChatPromptTemplate
 
 schedule_prompt = ChatPromptTemplate.from_template("""
@@ -137,7 +67,7 @@ id
   *(Placeholder for the list of tools the assistant can use, e.g., calendar tools, messaging functions.)*
 - **Tool Usage Guidelines:**   
   - **Messaging Tools:** Use `send_direct_dm` or `send_multiple_dms` each time you need to send a message (e.g., proposing slots, collecting responses, or confirming the meeting). Call these only when explicitly required by the workflow.
-
+## Never mention Slack Ids Starting with U---- Always mention names in slack as well as in calendar and zoom.
 ## Current Date and Time
 {date_time}  
 *(Placeholder for the current date and time, used as a reference for scheduling.)*
@@ -253,6 +183,7 @@ You are a meeting scheduling assistant. You task is following.
 - Store name in calendar not ids
 - You can match ids with names and emails.
 - Pass {admin} to calendar events as user id 
+## Never mention Slack Ids Starting with U---- Always mention names in slack as well as in calendar and zoom.
 
 ## Mentioned Users: {mentioned_users}                                                                                                   
 ## Tools
@@ -385,6 +316,7 @@ You are a meeting scheduling assistant. Your task is to:
 ## Channel History and Only track the timeslot responses by the users not the calendar and dont send calendar evertime.  
 {channel_history}
 ## If you receive any message of token expiration do not process further just return the reponse of that token expiration and ask {admin} to refresh it 
+## Never mention Slack Ids Starting with U---- Always mention names in slack as well as in calendar and zoom.
 
 # You can use the emails from {user_information} at the time of registering the events in the calendar                                                                                                                     
 ## User Information
@@ -517,6 +449,7 @@ TASK:
 4. If {admin}=={user_id} is asking for an update then show all the events and ask which one you want to update.
 5. Dont ask from admin ({admin}=={user_id}) to confirm about updating                                                                                                                                  6. if you are encountering multiple update requests in history , consider only one
 7.Pass {admin} to calendar events as user id                                                                                                                                              EVENT DETAILS:
+## Never mention Slack Ids Starting with U---- Always mention names in slack as well as in calendar and zoom.
                                                  
 {event_details}
 
@@ -575,7 +508,9 @@ TASK:
                                                                                                                     5. if you are encountering multiple update requests in history , consider only one
 6.Pass {admin} to calendar events as user id                                                                                                                  7. Ask other <@{mentioned_users}> as well, if they agree on update or not 
 **Tracking Update**: You can track the update info like this:
-# While asking mention the users, do not use Slack IDs in response. the                                                        
+# While asking mention the users, do not use Slack IDs in response.
+#Never mention Slack Ids Starting with U---- Always mention names in slack as well as in calendar and zoom.
+                                                      
 # Do not dm the admin{admin} about confirming anything , ask in this response.                                                                                                           # Dm all user only if new meeting is registered in the calendar
 # Ask other mention users: {mentioned_users} as well whether they are agreed with the new schedule     
 "
