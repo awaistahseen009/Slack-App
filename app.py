@@ -824,6 +824,13 @@ def handle_calendar_provider(ack, body, client, logger):
         client.chat_postMessage(channel=owner_id, text="Calendar provider reset.")
     logger.info(f"Calendar provider updated to {selected_provider} for owner {owner_id}")
 
+import os
+from google_auth_oauthlib.flow import Flow
+
+# Define your scopes and redirect URI (these could also come from env vars if needed)
+SCOPES = ['https://www.googleapis.com/auth/calendar']  # Example scopes
+# OAUTH_REDIRECT_URI = os.getenv('OAUTH_REDIRECT_URI', 'http://localhost:8000/')
+
 @bolt_app.action("configure_gcal")
 def handle_gcal_config(ack, body, client, logger):
     ack()
@@ -839,8 +846,20 @@ def handle_gcal_config(ack, body, client, logger):
     print(f"state stored: {state}")
     store_in_session(owner_id, "gcal_state", state)  # Optional: for additional validation
     
-    # Set up the OAuth flow and pass the state
-    flow = Flow.from_client_secrets_file('credentials.json', scopes=SCOPES, redirect_uri=OAUTH_REDIRECT_URI)
+    # Construct the client config from environment variables
+    client_config = {
+        "web": {
+            "client_id": os.getenv("GOOGLE_CLIENT_ID"),
+            "client_secret": os.getenv("GOOGLE_CLIENT_SECRET"),
+            "auth_uri": "https://accounts.google.com/o/oauth2/auth",
+            "token_uri": "https://oauth2.googleapis.com/token",
+            "auth_provider_x509_cert_url": "https://www.googleapis.com/oauth2/v1/certs",
+            "redirect_uris": [OAUTH_REDIRECT_URI]
+        }
+    }
+
+    # Set up the OAuth flow using the client config
+    flow = Flow.from_client_config(client_config, scopes=SCOPES, redirect_uri=OAUTH_REDIRECT_URI)
     auth_url, _ = flow.authorization_url(
         access_type='offline',
         prompt='consent',
@@ -1468,7 +1487,20 @@ def oauth2callback():
     if not client:
         return "Client not found", 500
     
-    flow = Flow.from_client_secrets_file('credentials.json', scopes=SCOPES, redirect_uri=OAUTH_REDIRECT_URI)
+    # Construct the client config from environment variables
+    client_config = {
+        "web": {
+            "client_id": os.getenv("GOOGLE_CLIENT_ID"),
+            "client_secret": os.getenv("GOOGLE_CLIENT_SECRET"),
+            "auth_uri": "https://accounts.google.com/o/oauth2/auth",
+            "token_uri": "https://oauth2.googleapis.com/token",
+            "auth_provider_x509_cert_url": "https://www.googleapis.com/oauth2/v1/certs",
+            "redirect_uris": [OAUTH_REDIRECT_URI]
+        }
+    }
+
+    # Set up the OAuth flow using the client config
+    flow = Flow.from_client_config(client_config, scopes=SCOPES, redirect_uri=OAUTH_REDIRECT_URI)
     flow.fetch_token(authorization_response=request.url)
     credentials = flow.credentials
     service = build('oauth2', 'v2', credentials=credentials)
@@ -1481,6 +1513,7 @@ def oauth2callback():
     client.views_publish(user_id=user_id, view=create_home_tab(client, team_id, user_id))
     
     return "Google Calendar connected successfully! You can close this window."
+
 @bolt_app.action("launch_auth")
 def handle_launch_auth(ack, body, logger):
     ack()  # Acknowledge the action
