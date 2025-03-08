@@ -74,12 +74,12 @@ SLACK_SCOPES = [
 import requests
 SLACK_BOT_USER_ID = os.getenv("SLACK_BOT_USER_ID")
 ZOOM_REDIRECT_URI = "https://clear-muskox-grand.ngrok-free.app/zoom_callback"
-CLIENT_ID = "FiyFvBUSSeeXwjDv0tqg"  # Zoom Client ID
-CLIENT_SECRET = "tygAN91Xd7Wo1YAH056wtbrXQ8I6UieA"  # Zoom Client Secret
+CLIENT_ID = os.getenv("ZOOM_CLIENT_ID") # Zoom Client ID
+CLIENT_SECRET = os.getenv("ZOOM_CLIENT_SECRET")  # Zoom Client Secret
 ZOOM_TOKEN_API = "https://zoom.us/oauth/token"
 ZOOM_OAUTH_AUTHORIZE_API = os.getenv("ZOOM_OAUTH_AUTHORIZE_API", "https://zoom.us/oauth/authorize")
 OAUTH_REDIRECT_URI = os.getenv("OAUTH_REDIRECT_URI", "https://clear-muskox-grand.ngrok-free.app/oauth2callback")
-MICROSOFT_CLIENT_ID = "855e4571-d92a-4d51-802e-e712a879c00b"
+MICROSOFT_CLIENT_ID = os.getenv("MICROSOFT_CLIENT_ID")
 MICROSOFT_CLIENT_SECRET = os.getenv("MICROSOFT_CLIENT_SECRET")
 MICROSOFT_AUTHORITY = "https://login.microsoftonline.com/common"
 MICROSOFT_SCOPES = ["User.Read", "Calendars.ReadWrite"]
