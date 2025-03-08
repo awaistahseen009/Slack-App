@@ -1329,7 +1329,7 @@ def handle_messages(body, say, client, context):
     if intent == "schedule meeting":
         if not channel_type and len(mentions) > 1:
             mentions.append(user_id)
-            dm_channel_id, error = open_group_dm(client, mentions)
+            dm_channel_id = open_group_dm(client, mentions)
             if dm_channel_id:
                 group_agent_input = agent_input.copy()
                 group_agent_input['mentioned_users'] = mentioned_users_output
@@ -1337,8 +1337,8 @@ def handle_messages(body, say, client, context):
                 group_agent_input['formatted_calendar'] = output
                 response = schedule_group_exec.invoke(group_agent_input)
                 client.chat_postMessage(channel=dm_channel_id, text=f"Group conversation started by <@{user_id}>\n\n{response['output']}")
-            elif error:
-                say(f"Sorry, I couldn't create the group conversation: {error}", thread_ts=thread_ts)
+            else :
+                say(f"Sorry, I couldn't create the group conversation", thread_ts=thread_ts)
         else:
             if channel_type or 'thread_ts' in event:
                 group_agent_input = agent_input.copy()
@@ -1453,7 +1453,7 @@ def open_group_dm(client, users):
         response = client.conversations_open(users=",".join(users))
         return response["channel"]["id"] if response["ok"] else (None, "Failed to create group DM")
     except SlackApiError as e:
-        return None, f"Error creating group DM: {e.response['error']}"
+        return None
 
 # Flask Routes
 @app.route("/slack/events", methods=["POST"])
