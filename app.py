@@ -292,7 +292,7 @@ oauth_settings = OAuthSettings(
     client_id=SLACK_CLIENT_ID,
     client_secret=SLACK_CLIENT_SECRET,
     scopes=SLACK_SCOPES,
-    redirect_uri="https://clear-muskox-grand.ngrok-free.app/slack/oauth_redirect",
+    redirect_uri=os.getenv("SLACK_OAuth"),
     installation_store=installation_store
 )
 bolt_app = App(signing_secret=SLACK_SIGNING_SECRET, oauth_settings=oauth_settings)
