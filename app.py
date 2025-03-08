@@ -1686,4 +1686,4 @@ def home():
 #     return render_template('ZOOM_verify_a12f2ccf48a647aa8ebc987a249133f8.html')
 port = int(os.getenv('PORT', 10000))
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=port)
+    app.run()
