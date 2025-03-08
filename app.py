@@ -21,7 +21,6 @@ from datetime import datetime, timedelta
 from collections import defaultdict
 import hashlib
 import re
-import logging
 from threading import Lock
 from urllib.parse import quote_plus
 from langchain.chains import LLMChain
@@ -85,9 +84,6 @@ from slack_sdk.oauth.installation_store.models.installation import Installation
 from slack_bolt.authorization import AuthorizeResult
 
 class DatabaseInstallationStore(InstallationStore):
-    def __init__(self):
-        self._logger = logging.getLogger(__name__)
-
     def save(self, installation):
         try:
             conn = psycopg2.connect(os.getenv('DATABASE_URL'))
@@ -119,17 +115,12 @@ class DatabaseInstallationStore(InstallationStore):
                     installation_data = %s, updated_at = %s
             ''', (workspace_id, json.dumps(installation_data), current_time, json.dumps(installation_data), current_time))
             conn.commit()
-            self._logger.info(f"Saved installation for workspace {workspace_id}")
-        except Exception as e:
-            self._logger.error(f"Failed to save installation for workspace {workspace_id}: {e}")
-            raise
         finally:
             cur.close()
             conn.close()
 
     def find_installation(self, enterprise_id=None, team_id=None, user_id=None, is_enterprise_install=False):
         if not team_id:
-            self._logger.warning("No team_id provided for find_installation")
             return None
         try:
             conn = psycopg2.connect(os.getenv('DATABASE_URL'))
@@ -157,11 +148,6 @@ class DatabaseInstallationStore(InstallationStore):
                     token_type=installation_data["token_type"],
                     installed_at=installed_at
                 )
-            else:
-                self._logger.info(f"No installation found for team_id {team_id}")
-                return None
-        except Exception as e:
-            self._logger.error(f"Error retrieving installation for team_id {team_id}: {e}")
             return None
         finally:
             cur.close()
@@ -169,7 +155,6 @@ class DatabaseInstallationStore(InstallationStore):
 
     def find_bot(self, enterprise_id=None, team_id=None, is_enterprise_install=False):
         if not team_id:
-            self._logger.warning("No team_id provided for find_bot")
             return None
         try:
             conn = psycopg2.connect(os.getenv('DATABASE_URL'))
@@ -185,11 +170,6 @@ class DatabaseInstallationStore(InstallationStore):
                     bot_id=installation_data["bot_id"],
                     bot_user_id=installation_data["bot_user_id"]
                 )
-            else:
-                self._logger.info(f"No bot installation found for team_id {team_id}")
-                return None
-        except Exception as e:
-            self._logger.error(f"Error retrieving bot for team_id {team_id}: {e}")
             return None
         finally:
             cur.close()
@@ -214,10 +194,6 @@ oauth_settings = OAuthSettings(
 )
 bolt_app = App(signing_secret=SLACK_SIGNING_SECRET, oauth_settings=oauth_settings)
 slack_handler = SlackRequestHandler(bolt_app)
-
-# Logging setup
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
 
 # Google Calendar API Scopes
 SCOPES = [
@@ -349,8 +325,7 @@ def load_preferences(team_id, user_id):
             preferences = {"zoom_config": {"mode": "manual", "link": None}, "calendar_tool": "none"}
         cur.close()
         conn.close()
-    except Exception as e:
-        logger.error(f"Failed to load preferences for team {team_id}, user {user_id}: {e}")
+    except Exception:
         preferences = {"zoom_config": {"mode": "manual", "link": None}, "calendar_tool": "none"}
     with preferences_cache_lock:
         preferences_cache[(team_id, user_id)] = preferences
@@ -440,16 +415,14 @@ def get_channel_owner_id(client, channel_id):
     try:
         response = client.conversations_info(channel=channel_id)
         return response["channel"].get("creator")
-    except SlackApiError as e:
-        logger.error(f"Error fetching channel info: {e.response['error']}")
+    except SlackApiError:
         return None
 
 def get_user_timezone(client, user_id):
     try:
         response = client.users_info(user=user_id)
         return response["user"].get("tz", "UTC")
-    except SlackApiError as e:
-        logger.error(f"Timezone error: {e.response['error']}")
+    except SlackApiError:
         return "UTC"
 
 def get_team_id_from_owner_id(owner_id):
@@ -476,10 +449,8 @@ def get_zoom_link(client, team_id):
     return prefs.get('zoom_config', {}).get('link')
 
 def create_home_tab(client, team_id, user_id):
-    logger.info(f"Creating home tab for user {user_id}, team {team_id}")
     workspace_owner_id = get_workspace_owner_id(client, team_id)
     if not workspace_owner_id:
-        logger.warning(f"No workspace owner for team {team_id}")
         blocks = [
             {"type": "header", "text": {"type": "plain_text", "text": "🤖 Welcome to AI Assistant!", "emoji": True}},
             {"type": "section", "text": {"type": "mrkdwn", "text": "Unable to determine workspace owner. Please contact support."}},
@@ -507,7 +478,6 @@ def create_home_tab(client, team_id, user_id):
     mode = zoom_config["mode"]
     calendar_token = load_token(team_id, workspace_owner_id, selected_provider) if selected_provider != "none" else None
     zoom_token = load_token(team_id, workspace_owner_id, "zoom") if mode == "automatic" else None
-    logger.info(f"Preferences loaded: {prefs}, Calendar token: {calendar_token}, Zoom token: {zoom_token}")
 
     zoom_token_expired = False
     if zoom_token and mode == "automatic":
@@ -598,6 +568,9 @@ def create_home_tab(client, team_id, user_id):
     ])
 
     if mode == "automatic":
+        session["team_id"] = team_id
+        session["user_id"] = workspace_owner_id
+        auth_url = f"{ZOOM_OAUTH_AUTHORIZE_API}?response_type=code&client_id={CLIENT_ID}&redirect_uri={quote_plus(ZOOM_REDIRECT_URI)}"
         if not zoom_configured and not zoom_token_expired:
             blocks[-1]["elements"].append({
                 "type": "button",
@@ -608,7 +581,7 @@ def create_home_tab(client, team_id, user_id):
             blocks[-1]["elements"].append({
                 "type": "button",
                 "text": {"type": "plain_text", "text": "Refresh Zoom Token", "emoji": True},
-                "action_id": "configure_zoom"
+                "url": auth_url  # Directly open the URL in the browser
             })
 
     return {"type": "home", "blocks": blocks}
@@ -655,11 +628,11 @@ def handle_app_home_opened(event, client, context):
         return
     try:
         client.views_publish(user_id=user_id, view=create_home_tab(client, team_id, user_id))
-    except Exception as e:
-        logger.error(f"Error publishing home tab: {e}")
+    except Exception:
+        pass
 
 @bolt_app.action("calendar_provider_dropdown")
-def handle_calendar_provider(ack, body, client, logger):
+def handle_calendar_provider(ack, body, client):
     ack()
     selected_provider = body["actions"][0]["selected_option"]["value"]
     user_id = body["user"]["id"]
@@ -670,16 +643,18 @@ def handle_calendar_provider(ack, body, client, logger):
         client.chat_postMessage(channel=user_id, text="Only the workspace owner can configure the calendar.")
         return
     
-    save_preference(team_id, owner_id, calendar_tool=selected_provider)
+    prefs = load_preferences(team_id, owner_id)
+    prefs["calendar_tool"] = selected_provider
     client.views_publish(user_id=owner_id, view=create_home_tab(client, team_id, owner_id))
+    save_preference(team_id, owner_id, calendar_tool=selected_provider)
+    
     if selected_provider != "none":
         client.chat_postMessage(channel=owner_id, text=f"Calendar provider updated to {selected_provider.capitalize()}.")
     else:
         client.chat_postMessage(channel=owner_id, text="Calendar provider reset.")
-    logger.info(f"Calendar provider updated to {selected_provider} for owner {owner_id}")
 
 @bolt_app.action("configure_gcal")
-def handle_gcal_config(ack, body, client, logger):
+def handle_gcal_config(ack, body, client):
     ack()
     user_id = body["user"]["id"]
     team_id = body["team"]["id"]
@@ -693,24 +668,21 @@ def handle_gcal_config(ack, body, client, logger):
     flow = Flow.from_client_secrets_file('credentials.json', scopes=SCOPES, redirect_uri=OAUTH_REDIRECT_URI)
     auth_url, _ = flow.authorization_url(access_type='offline', prompt='consent', include_granted_scopes='true')
     
-    try:
-        client.views_open(
-            trigger_id=body["trigger_id"],
-            view={
-                "type": "modal",
-                "title": {"type": "plain_text", "text": "Google Calendar Auth"},
-                "close": {"type": "plain_text", "text": "Cancel"},
-                "blocks": [
-                    {"type": "section", "text": {"type": "mrkdwn", "text": "Click below to connect Google Calendar:"}},
-                    {"type": "actions", "elements": [{"type": "button", "text": {"type": "plain_text", "text": "Connect Google Calendar"}, "url": auth_url, "action_id": "launch_auth"}]}
-                ]
-            }
-        )
-    except Exception as e:
-        logger.error(f"Error opening modal: {e}")
+    client.views_open(
+        trigger_id=body["trigger_id"],
+        view={
+            "type": "modal",
+            "title": {"type": "plain_text", "text": "Google Calendar Auth"},
+            "close": {"type": "plain_text", "text": "Cancel"},
+            "blocks": [
+                {"type": "section", "text": {"type": "mrkdwn", "text": "Click below to connect Google Calendar:"}},
+                {"type": "actions", "elements": [{"type": "button", "text": {"type": "plain_text", "text": "Connect Google Calendar"}, "url": auth_url, "action_id": "launch_auth"}]}
+            ]
+        }
+    )
 
 @bolt_app.action("configure_mscal")
-def handle_mscal_config(ack, body, client, logger):
+def handle_mscal_config(ack, body, client):
     ack()
     user_id = body["user"]["id"]
     team_id = body["team"]["id"]
@@ -724,27 +696,38 @@ def handle_mscal_config(ack, body, client, logger):
     msal_app = ConfidentialClientApplication(MICROSOFT_CLIENT_ID, authority=MICROSOFT_AUTHORITY, client_credential=MICROSOFT_CLIENT_SECRET)
     auth_url = msal_app.get_authorization_request_url(scopes=MICROSOFT_SCOPES, redirect_uri=MICROSOFT_REDIRECT_URI)
     
-    try:
-        client.views_open(
-            trigger_id=body["trigger_id"],
-            view={
-                "type": "modal",
-                "title": {"type": "plain_text", "text": "Microsoft Calendar Auth"},
-                "close": {"type": "plain_text", "text": "Close"},
-                "blocks": [
-                    {"type": "section", "text": {"type": "mrkdwn", "text": "Click below to authenticate with Microsoft:"}},
-                    {"type": "actions", "elements": [{"type": "button", "text": {"type": "plain_text", "text": "Connect Microsoft Calendar"}, "url": auth_url, "action_id": "ms_auth_button"}]}
-                ]
-            }
-        )
-    except Exception as e:
-        logger.error(f"Error opening Microsoft auth modal: {e}")
+    client.views_open(
+        trigger_id=body["trigger_id"],
+        view={
+            "type": "modal",
+            "title": {"type": "plain_text", "text": "Microsoft Calendar Auth"},
+            "close": {"type": "plain_text", "text": "Close"},
+            "blocks": [
+                {"type": "section", "text": {"type": "mrkdwn", "text": "Click below to authenticate with Microsoft:"}},
+                {"type": "actions", "elements": [{"type": "button", "text": {"type": "plain_text", "text": "Connect Microsoft Calendar"}, "url": auth_url, "action_id": "ms_auth_button"}]}
+            ]
+        }
+    )
 
 @bolt_app.action("configure_zoom")
-def handle_zoom_config(ack, body, client, logger):
+def handle_zoom_config(ack, body, client):
     ack()
     user_id = body["user"]["id"]
     team_id = body["team"]["id"]
+    auth_url = f"{ZOOM_OAUTH_AUTHORIZE_API}?response_type=code&client_id={CLIENT_ID}&redirect_uri={quote_plus(ZOOM_REDIRECT_URI)}"
+    
+    client.views_open(
+        trigger_id=body["trigger_id"],
+        view={
+            "type": "modal",
+            "title": {"type": "plain_text", "text": "Zoom Auth"},
+            "close": {"type": "plain_text", "text": "Cancel"},
+            "blocks": [
+                {"type": "section", "text": {"type": "mrkdwn", "text": "Click below to connect Zoom:"}},
+                {"type": "actions", "elements": [{"type": "button", "text": {"type": "plain_text", "text": "Connect Zoom"}, "url": auth_url, "action_id": "launch_zoom_auth"}]}
+            ]
+        }
+    )
     owner_id = get_workspace_owner_id(client, team_id)
     if user_id != owner_id:
         client.chat_postMessage(channel=user_id, text="Only the workspace owner can configure Zoom.")
@@ -752,32 +735,14 @@ def handle_zoom_config(ack, body, client, logger):
     
     session["team_id"] = team_id
     session["user_id"] = owner_id
-    auth_url = f"{ZOOM_OAUTH_AUTHORIZE_API}?response_type=code&client_id={CLIENT_ID}&redirect_uri={quote_plus(ZOOM_REDIRECT_URI)}"
     
-    try:
-        client.views_open(
-            trigger_id=body["trigger_id"],
-            view={
-                "type": "modal",
-                "title": {"type": "plain_text", "text": "Zoom Auth"},
-                "close": {"type": "plain_text", "text": "Cancel"},
-                "blocks": [
-                    {"type": "section", "text": {"type": "mrkdwn", "text": "Click below to connect Zoom:"}},
-                    {"type": "actions", "elements": [{"type": "button", "text": {"type": "plain_text", "text": "Connect Zoom"}, "url": auth_url, "action_id": "launch_zoom_auth"}]}
-                ]
-            }
-        )
-    except Exception as e:
-        logger.error(f"Error opening Zoom auth modal: {e}")
 
 @bolt_app.event("app_mention")
 def handle_mentions(event, say, client, context):
     if event_deduplicator.is_duplicate_event(event):
-        logger.info("Duplicate event detected, skipping processing")
         return
 
     if event.get("bot_id"):
-        logger.info("Ignoring message from bot")
         return
 
     user_id = event.get("user")
@@ -792,7 +757,6 @@ def handle_mentions(event, say, client, context):
 
     installation = installation_store.find_installation(team_id=team_id)
     if not installation or not installation.bot_user_id:
-        logger.error(f"No bot_user_id found for team {team_id}")
         say("Error: Could not determine bot user ID.", thread_ts=thread_ts)
         return
     
@@ -921,15 +885,13 @@ def get_relevant_user_ids(client, channel_id):
         while True:
             response = client.conversations_members(channel=channel_id, limit=10, cursor=cursor)
             if not response["ok"]:
-                logger.error(f"Failed to get members for channel {channel_id}: {response['error']}")
                 break
             members.extend(response["members"])
             cursor = response.get("response_metadata", {}).get("next_cursor")
             if not cursor:
                 break
         return members
-    except SlackApiError as e:
-        logger.error(f"Error getting conversation members: {e}")
+    except SlackApiError:
         return []
 
 calendar_formatting_chain = LLMChain(llm=llm, prompt=calender_prompt)
@@ -937,11 +899,9 @@ calendar_formatting_chain = LLMChain(llm=llm, prompt=calender_prompt)
 @bolt_app.event("message")
 def handle_messages(body, say, client, context):
     if event_deduplicator.is_duplicate_event(body):
-        logger.info("Duplicate event detected, skipping processing")
         return
     event = body.get("event", {})
     if event.get("bot_id"):
-        logger.info("Ignoring message from bot")
         return
 
     user_id = event.get("user")
@@ -955,7 +915,6 @@ def handle_messages(body, say, client, context):
 
     installation = installation_store.find_installation(team_id=team_id)
     if not installation or not installation.bot_user_id:
-        logger.error(f"No bot_user_id found for team {team_id}")
         say("Error: Could not determine bot user ID.", thread_ts=thread_ts)
         return
     bot_user_id = installation.bot_user_id
@@ -1104,7 +1063,7 @@ def handle_messages(body, say, client, context):
         say("I'm not sure how to handle that request.", thread_ts=thread_ts)
 
 @bolt_app.event("team_join")
-def handle_team_join(event, client, context, logger):
+def handle_team_join(event, client, context):
     try:
         user_info = event['user']
         team_id = context.team_id
@@ -1112,8 +1071,7 @@ def handle_team_join(event, client, context, logger):
         try:
             team_info = client.team_info()
             workspace_name = team_info['team']['name']
-        except SlackApiError as e:
-            logger.error(f"Error fetching team info: {e.response['error']}")
+        except SlackApiError:
             workspace_name = "Unknown Workspace"
 
         user_id = user_info['id']
@@ -1156,15 +1114,9 @@ def handle_team_join(event, client, context, logger):
         if is_owner:
             with owner_id_lock:
                 owner_id_cache[team_id] = user_id
-        
-        logger.info(f"Processed team_join event for user {user_id} in team {team_id}")
     
-    except KeyError as e:
-        logger.error(f"Missing key in event data: {e}")
-    except psycopg2.Error as e:
-        logger.error(f"Database error: {e}")
-    except Exception as e:
-        logger.error(f"Unexpected error handling team_join: {e}")
+    except Exception:
+        pass
 
 def open_group_dm(client, users):
     try:
@@ -1206,17 +1158,16 @@ def oauth2callback():
     token_data = json.loads(credentials.to_json())
     token_data['google_email'] = google_email
     
-    save_token(team_id, user_id, 'google', token_data)
     client.views_publish(user_id=user_id, view=create_home_tab(client, team_id, user_id))
+    save_token(team_id, user_id, 'google', token_data)
+    
     session.pop("team_id", None)
     session.pop("user_id", None)
-    
     return "Google Calendar connected successfully! You can close this window."
 
 @bolt_app.action("launch_auth")
-def handle_launch_auth(ack, body, logger):
+def handle_launch_auth(ack, body):
     ack()
-    logger.info(f"Launch auth triggered by user {body['user']['id']}")
 
 @app.route("/microsoft_callback")
 def microsoft_callback():
@@ -1239,11 +1190,12 @@ def microsoft_callback():
         return "Authentication failed", 400
     
     token_data = {"access_token": result["access_token"], "refresh_token": result.get("refresh_token", ""), "expires_at": result["expires_in"] + time.time()}
-    save_token(team_id, user_id, 'microsoft', token_data)
+    
     client.views_publish(user_id=user_id, view=create_home_tab(client, team_id, user_id))
+    save_token(team_id, user_id, 'microsoft', token_data)
+    
     session.pop("team_id", None)
     session.pop("user_id", None)
-    
     return "Microsoft Calendar connected successfully! You can close this window."
 
 @app.route("/zoom_callback")
@@ -1251,7 +1203,7 @@ def zoom_callback():
     code = request.args.get("code")
     if not code:
         return "Missing code parameter", 400
-    print(f"Session: {session_store} and ses: {session}")
+    
     team_id = session.get("team_id")
     user_id = session.get("user_id")
     if not team_id or not user_id:
@@ -1270,15 +1222,17 @@ def zoom_callback():
     if response.status_code == 200:
         token_data = response.json()
         token_data["expires_at"] = time.time() + token_data["expires_in"]
-        save_token(team_id, user_id, 'zoom', token_data)
+        
         client.views_publish(user_id=user_id, view=create_home_tab(client, team_id, user_id))
+        save_token(team_id, user_id, 'zoom', token_data)
+        
         session.pop("team_id", None)
         session.pop("user_id", None)
         return "Zoom connected successfully! You can close this window."
     return "Failed to retrieve token", 400
 
 @bolt_app.action("open_zoom_config_modal")
-def handle_open_zoom_config_modal(ack, body, client, logger):
+def handle_open_zoom_config_modal(ack, body, client):
     ack()
     user_id = body["user"]["id"]
     team_id = body["team"]["id"]
@@ -1292,51 +1246,48 @@ def handle_open_zoom_config_modal(ack, body, client, logger):
     mode = zoom_config["mode"]
     link = zoom_config.get("link", "")
     
-    try:
-        client.views_open(
-            trigger_id=body["trigger_id"],
-            view={
-                "type": "modal",
-                "callback_id": "zoom_config_submit",
-                "title": {"type": "plain_text", "text": "Configure Zoom"},
-                "submit": {"type": "plain_text", "text": "Save"},
-                "close": {"type": "plain_text", "text": "Cancel"},
-                "blocks": [
-                    {
-                        "type": "input",
-                        "block_id": "zoom_mode",
-                        "label": {"type": "plain_text", "text": "Zoom Mode"},
-                        "element": {
-                            "type": "static_select",
-                            "action_id": "mode_select",
-                            "placeholder": {"type": "plain_text", "text": "Select mode"},
-                            "options": [
-                                {"text": {"type": "plain_text", "text": "Automatic"}, "value": "automatic"},
-                                {"text": {"type": "plain_text", "text": "Manual"}, "value": "manual"}
-                            ],
-                            "initial_option": {"text": {"type": "plain_text", "text": "Automatic" if mode == "automatic" else "Manual"}, "value": mode} if mode else None
-                        }
-                    },
-                    {
-                        "type": "input",
-                        "block_id": "zoom_link",
-                        "label": {"type": "plain_text", "text": "Manual Zoom Link"},
-                        "element": {
-                            "type": "plain_text_input",
-                            "action_id": "link_input",
-                            "placeholder": {"type": "plain_text", "text": "Enter Zoom link"},
-                            "initial_value": link if isinstance(link, str) else ""
-                        },
-                        "optional": True
+    client.views_open(
+        trigger_id=body["trigger_id"],
+        view={
+            "type": "modal",
+            "callback_id": "zoom_config_submit",
+            "title": {"type": "plain_text", "text": "Configure Zoom"},
+            "submit": {"type": "plain_text", "text": "Save"},
+            "close": {"type": "plain_text", "text": "Cancel"},
+            "blocks": [
+                {
+                    "type": "input",
+                    "block_id": "zoom_mode",
+                    "label": {"type": "plain_text", "text": "Zoom Mode"},
+                    "element": {
+                        "type": "static_select",
+                        "action_id": "mode_select",
+                        "placeholder": {"type": "plain_text", "text": "Select mode"},
+                        "options": [
+                            {"text": {"type": "plain_text", "text": "Automatic"}, "value": "automatic"},
+                            {"text": {"type": "plain_text", "text": "Manual"}, "value": "manual"}
+                        ],
+                        "initial_option": {"text": {"type": "plain_text", "text": "Automatic" if mode == "automatic" else "Manual"}, "value": mode} if mode else None
                     }
-                ]
-            }
-        )
-    except Exception as e:
-        logger.error(f"Error opening Zoom config modal: {e}")
+                },
+                {
+                    "type": "input",
+                    "block_id": "zoom_link",
+                    "label": {"type": "plain_text", "text": "Manual Zoom Link"},
+                    "element": {
+                        "type": "plain_text_input",
+                        "action_id": "link_input",
+                        "placeholder": {"type": "plain_text", "text": "Enter Zoom link"},
+                        "initial_value": link if isinstance(link, str) else ""
+                    },
+                    "optional": True
+                }
+            ]
+        }
+    )
 
 @bolt_app.view("zoom_config_submit")
-def handle_zoom_config_submit(ack, body, client, logger):
+def handle_zoom_config_submit(ack, body, client):
     ack()
     user_id = body["user"]["id"]
     team_id = body["team"]["id"]
@@ -1349,11 +1300,11 @@ def handle_zoom_config_submit(ack, body, client, logger):
     link = values["zoom_link"]["link_input"]["value"] if "zoom_link" in values and "link_input" in values["zoom_link"] else None
     zoom_config = {"mode": mode, "link": link if mode == "manual" else None}
     
-    save_preference(team_id, user_id, zoom_config=zoom_config)
     client.views_publish(user_id=user_id, view=create_home_tab(client, team_id, user_id))
+    save_preference(team_id, user_id, zoom_config=zoom_config)
 
 @bolt_app.action("launch_zoom_auth")
-def handle_some_action(ack, body, logger):
+def handle_launch_zoom_auth(ack, body):
     ack()
 
 @app.route('/')
