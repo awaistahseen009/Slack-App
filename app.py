@@ -4,7 +4,7 @@ import time
 import json
 import base64
 from flask_talisman import Talisman
-from flask import Flask, request, jsonify, render_template, session
+from flask import Flask, request, jsonify, render_template
 from slack_sdk import WebClient
 from slack_sdk.errors import SlackApiError
 from slack_bolt import App
@@ -31,6 +31,7 @@ from agents.all_agents import (
 )
 from all_tools import tools, calendar_prompt_tools
 from db import init_db
+import requests
 
 # Load environment variables
 load_dotenv(find_dotenv())
@@ -47,7 +48,6 @@ SLACK_SCOPES = [
     "groups:write", "mpim:write", "commands", "team:read", "channels:read",
     "groups:read", "im:read", "mpim:read", "groups:history", "im:history", "mpim:history"
 ]
-import requests
 SLACK_BOT_USER_ID = os.getenv("SLACK_BOT_USER_ID")
 ZOOM_REDIRECT_URI = "https://clear-muskox-grand.ngrok-free.app/zoom_callback"
 CLIENT_ID = "FiyFvBUSSeeXwjDv0tqg"  # Zoom Client ID
@@ -568,9 +568,8 @@ def create_home_tab(client, team_id, user_id):
     ])
 
     if mode == "automatic":
-        session["team_id"] = team_id
-        session["user_id"] = workspace_owner_id
-        auth_url = f"{ZOOM_OAUTH_AUTHORIZE_API}?response_type=code&client_id={CLIENT_ID}&redirect_uri={quote_plus(ZOOM_REDIRECT_URI)}"
+        state = base64.urlsafe_b64encode(f"{team_id}:{workspace_owner_id}".encode()).decode().rstrip("=")
+        auth_url = f"{ZOOM_OAUTH_AUTHORIZE_API}?response_type=code&client_id={CLIENT_ID}&redirect_uri={quote_plus(ZOOM_REDIRECT_URI)}&state={state}"
         if not zoom_configured and not zoom_token_expired:
             blocks[-1]["elements"].append({
                 "type": "button",
@@ -581,7 +580,7 @@ def create_home_tab(client, team_id, user_id):
             blocks[-1]["elements"].append({
                 "type": "button",
                 "text": {"type": "plain_text", "text": "Refresh Zoom Token", "emoji": True},
-                "url": auth_url  # Directly open the URL in the browser
+                "url": auth_url
             })
 
     return {"type": "home", "blocks": blocks}
@@ -663,8 +662,6 @@ def handle_gcal_config(ack, body, client):
         client.chat_postMessage(channel=user_id, text="Only the workspace owner can configure the calendar.")
         return
     
-    session["team_id"] = team_id
-    session["user_id"] = owner_id
     flow = Flow.from_client_secrets_file('credentials.json', scopes=SCOPES, redirect_uri=OAUTH_REDIRECT_URI)
     auth_url, _ = flow.authorization_url(access_type='offline', prompt='consent', include_granted_scopes='true')
     
@@ -691,8 +688,6 @@ def handle_mscal_config(ack, body, client):
         client.chat_postMessage(channel=user_id, text="Only the workspace owner can configure the calendar.")
         return
     
-    session["team_id"] = team_id
-    session["user_id"] = owner_id
     msal_app = ConfidentialClientApplication(MICROSOFT_CLIENT_ID, authority=MICROSOFT_AUTHORITY, client_credential=MICROSOFT_CLIENT_SECRET)
     auth_url = msal_app.get_authorization_request_url(scopes=MICROSOFT_SCOPES, redirect_uri=MICROSOFT_REDIRECT_URI)
     
@@ -714,7 +709,13 @@ def handle_zoom_config(ack, body, client):
     ack()
     user_id = body["user"]["id"]
     team_id = body["team"]["id"]
-    auth_url = f"{ZOOM_OAUTH_AUTHORIZE_API}?response_type=code&client_id={CLIENT_ID}&redirect_uri={quote_plus(ZOOM_REDIRECT_URI)}"
+    owner_id = get_workspace_owner_id(client, team_id)
+    if user_id != owner_id:
+        client.chat_postMessage(channel=user_id, text="Only the workspace owner can configure Zoom.")
+        return
+    
+    state = base64.urlsafe_b64encode(f"{team_id}:{owner_id}".encode()).decode().rstrip("=")
+    auth_url = f"{ZOOM_OAUTH_AUTHORIZE_API}?response_type=code&client_id={CLIENT_ID}&redirect_uri={quote_plus(ZOOM_REDIRECT_URI)}&state={state}"
     
     client.views_open(
         trigger_id=body["trigger_id"],
@@ -728,14 +729,6 @@ def handle_zoom_config(ack, body, client):
             ]
         }
     )
-    owner_id = get_workspace_owner_id(client, team_id)
-    if user_id != owner_id:
-        client.chat_postMessage(channel=user_id, text="Only the workspace owner can configure Zoom.")
-        return
-    
-    session["team_id"] = team_id
-    session["user_id"] = owner_id
-    
 
 @bolt_app.event("app_mention")
 def handle_mentions(event, say, client, context):
@@ -884,9 +877,7 @@ def get_relevant_user_ids(client, channel_id):
         cursor = None
         while True:
             response = client.conversations_members(channel=channel_id, limit=10, cursor=cursor)
-            if not response["ok"]:
-                break
-            members.extend(response["members"])
+miles = response["members"])
             cursor = response.get("response_metadata", {}).get("next_cursor")
             if not cursor:
                 break
@@ -1201,13 +1192,15 @@ def microsoft_callback():
 @app.route("/zoom_callback")
 def zoom_callback():
     code = request.args.get("code")
-    if not code:
-        return "Missing code parameter", 400
+    state = request.args.get("state")
+    if not code or not state:
+        return "Missing code or state parameter", 400
     
-    team_id = session.get("team_id")
-    user_id = session.get("user_id")
-    if not team_id or not user_id:
-        return "Session expired or invalid", 400
+    try:
+        decoded_state = base64.urlsafe_b64decode(state + "==").decode()
+        team_id, user_id = decoded_state.split(":")
+    except Exception:
+        return "Invalid state parameter", 400
     
     client = get_client_for_team(team_id)
     if not client:
@@ -1226,8 +1219,6 @@ def zoom_callback():
         client.views_publish(user_id=user_id, view=create_home_tab(client, team_id, user_id))
         save_token(team_id, user_id, 'zoom', token_data)
         
-        session.pop("team_id", None)
-        session.pop("user_id", None)
         return "Zoom connected successfully! You can close this window."
     return "Failed to retrieve token", 400
 
