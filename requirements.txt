@@ -18,3 +18,5 @@ flask-session
 apscheduler
 flask-talisman
 psycopg2
+gunicorn
+uvicorn
