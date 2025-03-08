@@ -73,7 +73,7 @@ SLACK_SCOPES = [
 ]
 import requests
 SLACK_BOT_USER_ID = os.getenv("SLACK_BOT_USER_ID")
-ZOOM_REDIRECT_URI = "https://clear-muskox-grand.ngrok-free.app/zoom_callback"
+ZOOM_REDIRECT_URI = os.getenv('ZOOM_REDIRECT_URI')
 CLIENT_ID = os.getenv("ZOOM_CLIENT_ID") # Zoom Client ID
 CLIENT_SECRET = os.getenv("ZOOM_CLIENT_SECRET")  # Zoom Client Secret
 ZOOM_TOKEN_API = "https://zoom.us/oauth/token"
