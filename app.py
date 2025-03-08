@@ -15,7 +15,6 @@ from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import Flow
 from googleapiclient.discovery import build
-from flask_session import Session
 from msal import ConfidentialClientApplication
 import psycopg2
 from datetime import datetime, timedelta
@@ -65,7 +64,7 @@ MICROSOFT_REDIRECT_URI = os.getenv("MICROSOFT_REDIRECT_URI", "https://clear-musk
 
 # Initialize Flask app
 app = Flask(__name__)
-app.secret_key = secrets.token_hex(16)
+app.secret_key = secrets.token_hex(16)  # Required for in-memory sessions
 talisman = Talisman(
     app,
     content_security_policy={
@@ -79,8 +78,6 @@ talisman = Talisman(
     x_content_type_options=True,
     referrer_policy='no-referrer-when-downgrade'
 )
-app.config['SESSION_TYPE'] = 'filesystem'
-Session(app)
 
 # Installation Store for OAuth
 from slack_sdk.oauth import InstallationStore
@@ -1254,7 +1251,7 @@ def zoom_callback():
     code = request.args.get("code")
     if not code:
         return "Missing code parameter", 400
-    
+    print(f"Session: {session_store} and ses: {session}")
     team_id = session.get("team_id")
     user_id = session.get("user_id")
     if not team_id or not user_id:
