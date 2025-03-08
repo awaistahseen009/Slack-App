@@ -1680,7 +1680,7 @@ scheduler.start()
 
 @app.route('/')
 def home():
-    return render_template('index.html')
+    return "Hello"
 # @app.route('/ZOOM_verify_a12f2ccf48a647aa8ebc987a249133f8.html')
 # def home():
 #     return render_template('ZOOM_verify_a12f2ccf48a647aa8ebc987a249133f8.html')
