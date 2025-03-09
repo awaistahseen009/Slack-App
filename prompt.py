@@ -118,7 +118,7 @@ Which slot suits you best?"
 - **New Messages:** If a new message about the schedule is received, ignore old responses and focus on the latest request.  
 - ***Admin Disagreement** If admin doesnt agree with the timings , send the schedule again to the mentioned user and tell about admin's availability and ask to choose another slot.
 # [Important] Only mention users from the new request not old mentioned users
-                                                 
+# If all mentioned user agrees then call the tools and fix the meeting                                                  
 ## Channel History, You have the timestamp so give importance to the most recent timestamp messages and yes do carefull in mentioning the people and always mention them from latest timestamp or close to current one. 
 {channel_history}  
 
@@ -170,7 +170,8 @@ Which slot suits you best?"
 # Mention in calendar by names not by slack ids starting with U
 # Give detailed summary along with zoom details in calendar. 
 # Add the email of {admin} along with other attendees in the calendar                                                                                                        
-# Input
+# Input , If all mentioned user agrees then call the tools and fix the meeting    
+
 {input}
        
 ## Agent Scratchpad Once you receive success as response from the tool then close and end the chain
@@ -258,7 +259,8 @@ Which slot suits you best?"
 ## If a user agrees with a timeslot then mention other users and ask about their preference and tell the other users about selected preference by the user.
 ## Similarly,if some user disagree or say that he/she is not available or busy within the timeslot selected by other users so  mention other users and tell that they have to select some other schedule [IMPORTANT].
 
-# Only mention those members which are present in '{mentioned_users}' , not all the members from user information.   
+# Only mention those members which are present in '{mentioned_users}' , not all the members from user information.
+# If all mentioned user agrees then call the tools and fix the meeting     
 ## Channel History, You have the timestamp so give importance to the most recent timestamp messages and yes do carefull in mentioning the people and always mention them from latest timestamp or close to current one. 
 '{channel_history}'  
 
@@ -311,7 +313,8 @@ Which slot suits you best?"
 # Mention in calendar by names not by slack ids starting with U
 # Give detailed summary along with zoom details in calendar. 
 # Add the email of {admin} along with other attendees in the calendar       
-# Input
+## Input , If all mentioned user agrees then call the tools and fix the meeting    
+
 {input}
 ## Agent Scratchpad Once you receive success as response from the tool then close and end the chain
 {agent_scratchpad}  
@@ -433,7 +436,7 @@ Monitor user responses:
 ## Admin Slack ID  
 {admin}
 # Never mention Slack Id in calendar summary or meeting description , always write the Names , dont write this 'This meeting was scheduled by U-------- on Slack'                                                             
-## Input  
+## Input , If all mentioned user agrees then call the tools and fix the meeting    
 {input}
 
 # DO NOT REGISTER THE EVENT MULTIPLE TIMES — THIS IS CRUCIAL.
