@@ -1238,8 +1238,13 @@ def handle_messages(body, say, client, context):
     bot_user_id = installation.bot_user_id
 
     if not channel.get("is_im") and f"<@{bot_user_id}>" in text:
+        logger.info("Message contains bot mention in non-IM channel, skipping in message handler")
         return
     if not channel.get("is_im") and "thread_ts" not in event:
+        logger.info("Message contains bot mention in non-IM channel (not a thread), skipping in message handler")
+
+    if not calendar_tool:
+        say("The workspace owner has not configured a calendar yet.", thread_ts=thread_ts)
         return
     if not calendar_tool or calendar_tool == "none":
         say("The workspace owner has not configured a calendar yet.", thread_ts=thread_ts)
