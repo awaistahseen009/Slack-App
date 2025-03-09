@@ -953,7 +953,7 @@ def handle_mentions(event, say, client, context):
     zoom_link = get_zoom_link(client, team_id)
     zoom_mode = load_preferences(team_id, workspace_owner_id).get("zoom_config", {}).get("mode", "manual")
 
-    channel_history = client.conversations_history(channel=channel_id, limit=2).get("messages", [])
+    channel_history = client.conversations_history(channel=channel_id, limit=3).get("messages", [])
     channel_history = format_channel_history(channel_history)
     intent = intent_chain.run({"history": channel_history, "input": text})
 
@@ -1255,7 +1255,7 @@ def handle_messages(body, say, client, context):
     timezone = get_user_timezone(client, user_id)
     zoom_link = get_zoom_link(client, team_id)
     zoom_mode = load_preferences(team_id, workspace_owner_id).get("zoom_config", {}).get("mode", "manual")
-    channel_history = client.conversations_history(channel=channel_id, limit=2).get("messages", [])
+    channel_history = client.conversations_history(channel=channel_id, limit=3).get("messages", [])
     channel_history = format_channel_history(channel_history)
     intent = intent_chain.run({"history": channel_history, "input": text})
 
@@ -1332,7 +1332,7 @@ def handle_messages(body, say, client, context):
     }
 
     if intent == "schedule meeting":
-        if not channel_type and len(mentions) > 1:
+        if not channel_type and len(mentions) >= 1:
             mentions.append(user_id)
             dm_channel_id = open_group_dm(client, mentions)
             if dm_channel_id:
@@ -1349,7 +1349,7 @@ def handle_messages(body, say, client, context):
                 group_agent_input = agent_input.copy()
                 if 'thread_ts' in event:
                     schedule_group_exec = create_schedule_channel_agent(schedule_tools)
-                    history_response = client.conversations_replies(channel=channel_id, ts=thread_ts, limit=2)
+                    history_response = client.conversations_replies(channel=channel_id, ts=thread_ts, limit=3)
                     channel_history = format_channel_history(history_response.get("messages", []))
                 else:
                     channel_history = format_channel_history(client.conversations_history(channel=channel_id, limit=3).get("messages", []))
@@ -1366,7 +1366,7 @@ def handle_messages(body, say, client, context):
         agent_input['calendar_events'] = MicrosoftListCalendarEvents()._run(team_id, workspace_owner_id) if calendar_tool == "microsoft" else GoogleCalendarEvents()._run(team_id, workspace_owner_id)
         if channel_type or 'thread_ts' in event:
             group_agent_input = agent_input.copy()
-            channel_history = format_channel_history(client.conversations_history(channel=channel_id, limit=2).get("messages", []))
+            channel_history = format_channel_history(client.conversations_history(channel=channel_id, limit=3).get("messages", []))
             group_agent_input['mentioned_users'] = mentioned_users_output
             group_agent_input['channel_history'] = channel_history
             group_agent_input['formatted_calendar'] = output
