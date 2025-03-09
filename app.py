@@ -953,7 +953,7 @@ def handle_mentions(event, say, client, context):
     zoom_link = get_zoom_link(client, team_id)
     zoom_mode = load_preferences(team_id, workspace_owner_id).get("zoom_config", {}).get("mode", "manual")
 
-    channel_history = client.conversations_history(channel=channel_id, limit=3).get("messages", [])
+    channel_history = client.conversations_history(channel=channel_id, limit=2).get("messages", [])
     channel_history = format_channel_history(channel_history)
     intent = intent_chain.run({"history": channel_history, "input": text})
 
@@ -1255,7 +1255,7 @@ def handle_messages(body, say, client, context):
     timezone = get_user_timezone(client, user_id)
     zoom_link = get_zoom_link(client, team_id)
     zoom_mode = load_preferences(team_id, workspace_owner_id).get("zoom_config", {}).get("mode", "manual")
-    channel_history = client.conversations_history(channel=channel_id, limit=3).get("messages", [])
+    channel_history = client.conversations_history(channel=channel_id, limit=2).get("messages", [])
     channel_history = format_channel_history(channel_history)
     intent = intent_chain.run({"history": channel_history, "input": text})
 
@@ -1352,7 +1352,7 @@ def handle_messages(body, say, client, context):
                     history_response = client.conversations_replies(channel=channel_id, ts=thread_ts, limit=3)
                     channel_history = format_channel_history(history_response.get("messages", []))
                 else:
-                    channel_history = format_channel_history(client.conversations_history(channel=channel_id, limit=3).get("messages", []))
+                    channel_history = format_channel_history(client.conversations_history(channel=channel_id, limit=2).get("messages", []))
                 group_agent_input['mentioned_users'] = mentioned_users_output
                 group_agent_input['channel_history'] = channel_history
                 group_agent_input['formatted_calendar'] = output
