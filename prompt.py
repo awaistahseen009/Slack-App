@@ -104,7 +104,7 @@ Which slot suits you best?"
 - Keep track of each user’s response (e.g., "U1: agreed, U2: agreed, U3: disagreed").  
 - Repeat this step, mentioning users in message as needed, until all users agree on one time slot.
 - Do not send dm to users and admin until all other users and admin agrees. and it should include a summary of the meeting (e.g., "Meeting with U1, U2, U3").  
-4: First register the zoom meeting using the tool 'create_zoom_meeting' and then register the event in the calendar using either 'microsoft_calendar_add_event' or 'google_add_calendar_event' based on calendar tools and also include the formatted output of this in the calendar summary.  
+# [Very important here] First register the zoom meeting using the tool 'create_zoom_meeting' and then register the event in the calendar using either 'microsoft_calendar_add_event' or 'google_add_calendar_event' based on calendar tools and also include the formatted output of this in the calendar summary.   
 # Do not use this tool until all users and admin are agreed: - 
    - `send_direct_dm` for one user (e.g., `send_direct_dm(user_id='UC3472938', message='Meeting scheduled...')`).  
    - `send_multiple_dms` for multiple users excluding the admin (e.g., `send_multiple_dms(user_ids=['UA263487', 'UB8984234'], message='Meeting scheduled...')`).
@@ -247,7 +247,7 @@ Which slot suits you best?"
   and if any of them from '{mentioned_users}' disagrees then mention other users from '{mentioned_users}' and ask them again the slot and if all are agreed then schedule the event using microsoft_calendar_add_event or google_add_calendar_event as mentioned in calendar tools.
 - Keep track of each user’s response (e.g., "U1: agreed, U2: agreed, U3: disagreed").  
 - Do not send messages until all other users and admin agree. The final response should include a summary of the meeting (e.g., "Meeting with U1, U2, U3").  
-4: First register the zoom meeting using the tool 'create_zoom_meeting' and then register the event in the calendar using either 'microsoft_calendar_add_event' or 'google_add_calendar_event' based on calendar tools and also include the formatted output of this in the calendar summary.  
+# [Very important here] First register the zoom meeting using the tool 'create_zoom_meeting' and then register the event in the calendar using either 'microsoft_calendar_add_event' or 'google_add_calendar_event' based on calendar tools and also include the formatted output of this in the calendar summary.  
 # Do not use this tool until all users and admin are agreed: - 
    - microsoft_calendar_add_event:  for registering the scheduled event in microsoft calendar if "microsoft" is selected as calendar tool
    - google_add_calendar_event:     for registering the scheduled event in google calendar if "google" is selected as calendar tool                                                                                   
@@ -397,7 +397,7 @@ Monitor user responses:
 - If a conflict arises, notify users and find consensus.  
 - Mention only users in {mentioned_users}, not everyone in {user_information}.  
 
-### 5: First register the zoom meeting using the tool 'create_zoom_meeting' and then register the event in the calendar and also include the formatted output of this in the calendar summary.                                                            
+# [Very important here] First register the zoom meeting using the tool 'create_zoom_meeting' and then register the event in the calendar using either 'microsoft_calendar_add_event' or 'google_add_calendar_event' based on calendar tools and also include the formatted output of this in the calendar summary.                                                         
 ### If one person responds with timeslot then use his/her timeslot and mention others and ask them whether they are okay with this slot or not and track everyones response and do not send the calendar again until there is a disagreement or someone asks explicitly but just track the date and mentions                                                           
 ## Channel History, You have the timestamp so give importance to the most recent timestamp messages and yes do carefull in mentioning the people and always mention them from latest timestamp or close to current one. 
 # Do not consider old mentions in history if there is a request for a new meeting.
