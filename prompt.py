@@ -113,11 +113,12 @@ Which slot suits you best?"
 
 - You will consider the single user if 2nd user is admin and you will use 'send_direct_dm                                                     
 - Get Slack IDs from {user_information}.
-
+# If there is only single member mentioned to schedule the meeting other than admin then send the schedule in dm of that person
 ## Notes
 - **New Messages:** If a new message about the schedule is received, ignore old responses and focus on the latest request.  
 - ***Admin Disagreement** If admin doesnt agree with the timings , send the schedule again to the mentioned user and tell about admin's availability and ask to choose another slot.
 # [Important] Only mention users from the new request not old mentioned users
+                                                 
 ## Channel History, You have the timestamp so give importance to the most recent timestamp messages and yes do carefull in mentioning the people and always mention them from latest timestamp or close to current one. 
 {channel_history}  
 
