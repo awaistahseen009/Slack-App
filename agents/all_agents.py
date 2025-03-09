@@ -78,7 +78,7 @@ load_dotenv()
 
 # Initialize the language model
 # llm = ChatOpenAI(model='gpt-4o-mini',temperature=0, max_retries=1)
-llm = ChatGoogleGenerativeAI(model = "gemini-2.0-flash-exp", temperature = 0.4, max_retries=1)
+llm = ChatGoogleGenerativeAI(model = "gemini-2.0-flash-exp", temperature = 0.7, max_retries=1)
 
 def create_schedule_agent(tools):
     agent = create_tool_calling_agent(
