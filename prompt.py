@@ -40,7 +40,8 @@ STEP 4. Prepare those slots in this reference format
     06-12-2024 | Wednesday | All Day | PT
     07-12-2024 | Thursday | 9am - 10am | PT
                                                    
-"                                              
+"
+# Filter out the registered event slots or scheduled slots.                                                                                                
 <UNFORMATTED EVENTS>
 {input}                                                                                                                                                                                   
 FINAL OUTPUT: Formatted slots in given format and dont include any step details or preprocessing details
@@ -126,7 +127,7 @@ Which slot suits you best?"
 
 ## Team id (if needed)
 {team_id}
-## Formatted Calendar Events
+## Formatted Calendar Events (Remember if user ask for slots that aren't free then give response this slot is already booked).
 {formatted_calendar}  
 
 
@@ -163,7 +164,11 @@ Which slot suits you best?"
 # Good agents always use the tool once and end the chain                                                  
 # You can use the emails for the attendees from the user information provided.
 # Track used tools here and dont use them again i.e (Dm tool: used ): ____                                                                                                                
-# Never mention Slack Id in calendar summary or meeting description , always write the Names , dont write this 'This meeting was scheduled by U-------- on Slack'                                                                                                       
+# Never mention Slack Id in calendar summary or meeting description , always write the Names , dont write this 'This meeting was scheduled by U-------- on Slack'
+# Always mention in channel  by <@SLACK_ID_HERE>
+# Mention in calendar by names not by slack ids starting with U
+# Give detailed summary along with zoom details in calendar. 
+# Add the email of {admin} along with other attendees in the calendar                                                                                                        
 # Input
 {input}
        
@@ -261,7 +266,7 @@ Which slot suits you best?"
 {user_information}  
 
 
-## Formatted Calendar Events
+## Formatted Calendar Events (Remember if user ask for slots that aren't free then give response this slot is already booked).
 {formatted_calendar}  
 
 
@@ -301,9 +306,12 @@ Which slot suits you best?"
 # Use channel history to track the responses and dont mark the user in awaiting state if he already answered.               
 # Dont say this in summary "This meeting was scheduled by U983482" Instead of Id use the name and give zoom information there                                          
 # Track used tools here and dont use them again i.e (Used tools: ____ )                                                                                                               # Never mention Slack Id in calendar summary or meeting description , always write the Names , dont write this 'This meeting was scheduled by U-------- on Slack'                                                                                                           
+# Always mention in channel  by <@SLACK_ID_HERE>
+# Mention in calendar by names not by slack ids starting with U
+# Give detailed summary along with zoom details in calendar. 
+# Add the email of {admin} along with other attendees in the calendar       
 # Input
 {input}
-## Always mention in channel and calendar by name not by slack Id and also add the email of {admin} along with other attendees in the calendar       
 ## Agent Scratchpad Once you receive success as response from the tool then close and end the chain
 {agent_scratchpad}  
 ## OUTPUT: Give meeting details in a good format and event success registration.                                                           
@@ -403,7 +411,7 @@ Monitor user responses:
 ## Users Information  
 {user_information}
 
-## Formatted Calendar Events  
+## Formatted Calendar Events (Remember if user ask for slots that aren't free then give response this slot is already booked).
 {formatted_calendar}
 
 ## Event Details  
@@ -429,7 +437,10 @@ Monitor user responses:
 
 # DO NOT REGISTER THE EVENT MULTIPLE TIMES — THIS IS CRUCIAL.
 # Dont say this in summary "This meeting was scheduled by U983482" Instead of Id use the name and give zoom information there                                                           
-## Always mention in channel and calendar by name not by slack Id and also add the email of {admin} along with other attendees in the calendar  
+# Always mention in channel  by <@SLACK_ID_HERE>
+# Mention in calendar by names not by slack ids starting with U
+# Give detailed summary along with zoom details in calendar. 
+# Add the email of {admin} along with other attendees in the calendar  
 ## Agent Scratchpad and once you recevive success for registering event then stop the chain
 {agent_scratchpad} 
 ## OUTPUT: Give meeting details in a good format and event success registration.                                                              
