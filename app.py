@@ -4,9 +4,12 @@ import time
 import json
 import base64
 from flask_talisman import Talisman
-from flask import Flask, request, jsonify,render_template
+from flask import Flask, request, jsonify, render_template, session
+from werkzeug.datastructures import CallbackDict
+from flask.sessions import SessionInterface, SessionMixin
 from slack_sdk import WebClient
 from slack_sdk.errors import SlackApiError
+from utils import format_calendar_events,get_mentions_from_history
 from slack_bolt import App
 from slack_bolt.adapter.flask import SlackRequestHandler
 from slack_bolt.oauth.oauth_settings import OAuthSettings
@@ -14,18 +17,21 @@ from dotenv import find_dotenv, load_dotenv
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import Flow
+from psycopg2.extras import Json
 from googleapiclient.discovery import build
-from flask_session import Session
+from slack_sdk.oauth import InstallationStore
+from slack_sdk.oauth.installation_store.models.installation import Installation
+from slack_bolt.authorization import AuthorizeResult
 from msal import ConfidentialClientApplication
 import psycopg2
 from apscheduler.schedulers.background import BackgroundScheduler
 from datetime import datetime, timedelta
 from collections import defaultdict
 import hashlib
+from utils import get_user_timezone
 import re
 import logging
 from threading import Lock
-
 from urllib.parse import quote_plus
 from langchain.chains import LLMChain
 from langchain.prompts import ChatPromptTemplate
@@ -35,6 +41,7 @@ from agents.all_agents import (
 )
 from all_tools import tools, calendar_prompt_tools
 from db import init_db
+import requests
 
 # Load environment variables
 load_dotenv(find_dotenv())
@@ -42,40 +49,19 @@ os.environ['OAUTHLIB_INSECURE_TRANSPORT'] = '1'
 os.environ['OAUTHLIB_RELAX_TOKEN_SCOPE'] = '1'
 os.environ['OAUTHLIB_IGNORE_SCOPE_CHANGE'] = '1'
 
-
-user_cache = {}
-user_cache_lock = Lock()  # Example threading lock for cache
-preferences_cache = {}
-preferences_cache_lock = Lock()
-owner_id_cache = {}
-owner_id_lock = Lock()
 # Configuration
-SLACK_CLIENT_ID = os.getenv('SLACK_CLIENT_ID','')
-SLACK_CLIENT_SECRET = os.getenv('SLACK_CLIENT_SECRET','')
-SLACK_SIGNING_SECRET = os.getenv('SLACK_SIGNING_SECRET','')
+SLACK_CLIENT_ID = os.getenv('SLACK_CLIENT_ID', '')
+SLACK_CLIENT_SECRET = os.getenv('SLACK_CLIENT_SECRET', '')
+SLACK_SIGNING_SECRET = os.getenv('SLACK_SIGNING_SECRET', '')
 SLACK_SCOPES = [
-    "app_mentions:read",
-    "channels:history",
-    "chat:write",
-    "users:read",
-    "im:write",
-    "groups:write",
-    "mpim:write",
-    "commands",
-    "team:read",
-    "channels:read",
-    "groups:read",
-    "im:read",
-    "mpim:read",
-    "groups:history",
-    "im:history",
-    "mpim:history"
+    "app_mentions:read", "channels:history", "chat:write", "users:read", "im:write",
+    "groups:write", "mpim:write", "commands", "team:read", "channels:read",
+    "groups:read", "im:read", "mpim:read", "groups:history", "im:history", "mpim:history"
 ]
-import requests
 SLACK_BOT_USER_ID = os.getenv("SLACK_BOT_USER_ID")
 ZOOM_REDIRECT_URI = os.getenv('ZOOM_REDIRECT_URI')
-CLIENT_ID = os.getenv("ZOOM_CLIENT_ID") # Zoom Client ID
-CLIENT_SECRET = os.getenv("ZOOM_CLIENT_SECRET")  # Zoom Client Secret
+CLIENT_ID = os.getenv("ZOOM_CLIENT_ID")
+CLIENT_SECRET = os.getenv("ZOOM_CLIENT_SECRET")
 ZOOM_TOKEN_API = "https://zoom.us/oauth/token"
 ZOOM_OAUTH_AUTHORIZE_API = os.getenv("ZOOM_OAUTH_AUTHORIZE_API", "https://zoom.us/oauth/authorize")
 OAUTH_REDIRECT_URI = os.getenv("OAUTH_REDIRECT_URI", "https://clear-muskox-grand.ngrok-free.app/oauth2callback")
@@ -101,45 +87,62 @@ talisman = Talisman(
     x_content_type_options=True,
     referrer_policy='no-referrer-when-downgrade'
 )
-app.config['SESSION_TYPE'] = 'filesystem'
-Session(app)
+
+# Custom In-Memory Session Interface
+class InMemorySession(dict, SessionMixin):
+    def __init__(self, sid):
+        self.sid = sid
+        super().__init__()
+
+class InMemorySessionInterface(SessionInterface):
+    def __init__(self):
+        self.sessions = {}
+
+    def generate_sid(self):
+        return secrets.token_urlsafe(32)
+
+    def open_session(self, app, request):
+        cookie_name = app.config.get('SESSION_COOKIE_NAME', 'session')
+        sid = request.cookies.get(cookie_name)
+        if sid and sid in self.sessions:
+            return self.sessions[sid]
+        sid = self.generate_sid()
+        return InMemorySession(sid=sid)
+
+    def save_session(self, app, session, response):
+        cookie_name = app.config.get('SESSION_COOKIE_NAME', 'session')
+        domain = app.config.get('SESSION_COOKIE_DOMAIN')
+        path = app.config.get('SESSION_COOKIE_PATH', '/')
+        secure = app.config.get('SESSION_COOKIE_SECURE', False)
+        httponly = app.config.get('SESSION_COOKIE_HTTPONLY', True)
+        samesite = app.config.get('SESSION_COOKIE_SAMESITE', None)
+        max_age = app.config.get('PERMANENT_SESSION_LIFETIME', 31_536_000)
+
+        if session is None:
+            response.delete_cookie(cookie_name, domain=domain, path=path)
+            return
+
+        if not session:
+            if session.sid in self.sessions:
+                del self.sessions[session.sid]
+            response.delete_cookie(cookie_name, domain=domain, path=path)
+            return
+
+        self.sessions[session.sid] = session
+        response.set_cookie(
+            cookie_name, session.sid, max_age=max_age, secure=secure,
+            httponly=httponly, domain=domain, path=path, samesite=samesite
+        )
+
+app.session_interface = InMemorySessionInterface()
+app.config['SESSION_COOKIE_NAME'] = 'custom_session'
+app.config['SESSION_COOKIE_SECURE'] = True
+app.config['SESSION_COOKIE_HTTPONLY'] = True
+app.config['SESSION_COOKIE_SAMESITE'] = 'Lax'
+app.config['PERMANENT_SESSION_LIFETIME'] = timedelta(days=1).total_seconds()
 
 # Installation Store for OAuth
-import json
-import os
-import psycopg2
-from datetime import datetime
-
-import json
-import os
-import psycopg2
-from datetime import datetime
-from slack_sdk.oauth import InstallationStore
-# Custom JSON encoder to handle datetime objects
-import json
-import os
-import psycopg2
-from psycopg2.extras import Json
-from datetime import datetime
-import logging
-from slack_sdk import WebClient
-from slack_sdk.oauth import InstallationStore
-from slack_sdk.oauth.installation_store.models.installation import Installation
-from slack_bolt.authorization import AuthorizeResult
-
-# Custom JSON encoder for datetime objects (used only if needed)
-class DateTimeEncoder(json.JSONEncoder):
-    def default(self, obj):
-        if isinstance(obj, datetime):
-            return obj.isoformat()
-        return super().default(obj)
-
-class DatabaseInstallationStore(InstallationStore):
-    """A database-backed installation store for Slack Bolt using PostgreSQL.
-    
-    Assumes 'installation_data' is a jsonb column storing JSON data.
-    """
-
+class DatabaseInstallationStore:
     def __init__(self):
         self._logger = logging.getLogger(__name__)
 
@@ -147,10 +150,8 @@ class DatabaseInstallationStore(InstallationStore):
         try:
             conn = psycopg2.connect(os.getenv('DATABASE_URL'))
             cur = conn.cursor()
-            
             workspace_id = installation.team_id
             installed_at = datetime.fromtimestamp(installation.installed_at) if installation.installed_at else None
-            
             installation_data = {
                 "team_id": installation.team_id,
                 "enterprise_id": installation.enterprise_id,
@@ -169,19 +170,15 @@ class DatabaseInstallationStore(InstallationStore):
                 "token_type": installation.token_type,
                 "installed_at": installed_at.isoformat() if installed_at else None
             }
-            
             current_time = datetime.now()
-            
             cur.execute('''
                 INSERT INTO Installations (workspace_id, installation_data, updated_at)
                 VALUES (%s, %s, %s)
                 ON CONFLICT (workspace_id) DO UPDATE SET
                     installation_data = %s, updated_at = %s
             ''', (workspace_id, Json(installation_data), current_time, Json(installation_data), current_time))
-            
             conn.commit()
             self._logger.info(f"Saved installation for workspace {workspace_id}")
-        
         except Exception as e:
             self._logger.error(f"Failed to save installation for workspace {workspace_id}: {e}")
             raise
@@ -194,18 +191,23 @@ class DatabaseInstallationStore(InstallationStore):
             self._logger.warning("No team_id provided for find_installation")
             return None
         
+        # Initialize variables to None
+        conn = None
+        cur = None
+        
         try:
+            # Attempt to connect to the database
             conn = psycopg2.connect(os.getenv('DATABASE_URL'))
             cur = conn.cursor()
+            
+            # Query the database
             cur.execute('SELECT installation_data FROM Installations WHERE workspace_id = %s', (team_id,))
             row = cur.fetchone()
             
             if row:
-                # For jsonb, row[0] is already a dict
                 installation_data = row[0]
                 installed_at = (datetime.fromisoformat(installation_data["installed_at"])
                                 if installation_data.get("installed_at") else None)
-                
                 return Installation(
                     app_id=installation_data["app_id"],
                     enterprise_id=installation_data.get("enterprise_id"),
@@ -231,21 +233,23 @@ class DatabaseInstallationStore(InstallationStore):
         except Exception as e:
             self._logger.error(f"Error retrieving installation for team_id {team_id}: {e}")
             return None
+        
         finally:
-            cur.close()
-            conn.close()
+            # Only close if they were created
+            if cur is not None:
+                cur.close()
+            if conn is not None:
+                conn.close()
 
     def find_bot(self, enterprise_id=None, team_id=None, is_enterprise_install=False):
         if not team_id:
             self._logger.warning("No team_id provided for find_bot")
             return None
-        
         try:
             conn = psycopg2.connect(os.getenv('DATABASE_URL'))
             cur = conn.cursor()
             cur.execute('SELECT installation_data FROM Installations WHERE workspace_id = %s', (team_id,))
             row = cur.fetchone()
-            
             if row:
                 installation_data = row[0]
                 return AuthorizeResult(
@@ -258,7 +262,6 @@ class DatabaseInstallationStore(InstallationStore):
             else:
                 self._logger.info(f"No bot installation found for team_id {team_id}")
                 return None
-        
         except Exception as e:
             self._logger.error(f"Error retrieving bot for team_id {team_id}: {e}")
             return None
@@ -266,28 +269,16 @@ class DatabaseInstallationStore(InstallationStore):
             cur.close()
             conn.close()
 
-# Instantiate the store
 installation_store = DatabaseInstallationStore()
 
 def get_client_for_team(team_id):
-    """
-    Get a Slack WebClient for a given team ID using the stored bot token.
-
-    Args:
-        team_id (str): The team ID (workspace ID) to look up.
-
-    Returns:
-        WebClient: Slack client instance or None if not found.
-    """
     installation = installation_store.find_installation(None, team_id)
     if installation:
-        token = installation.bot_token  # Use dot notation instead of subscripting
+        token = installation.bot_token
         return WebClient(token=token)
     return None
 
-
-
-# Initialize Slack Bolt app with OAuth settings
+# Initialize Slack Bolt app
 oauth_settings = OAuthSettings(
     client_id=SLACK_CLIENT_ID,
     client_secret=SLACK_CLIENT_SECRET,
@@ -310,7 +301,7 @@ SCOPES = [
     'https://www.googleapis.com/auth/userinfo.profile'
 ]
 
-# Initialize Neon Postgres database
+# Initialize database
 init_db()
 
 # State Management Classes
@@ -407,16 +398,6 @@ def store_in_session(user_id, key_type, data):
 def get_from_session(user_id, key_type, default=None):
     return session_store.get(user_id, key_type, default)
 
-# Global Caches (per workspace)
-user_cache = {}  # {team_id: {user_id: user_data}}
-user_cache_lock = Lock()
-
-owner_id_cache = {}  # {team_id: owner_id}
-owner_id_lock = Lock()
-
-preferences_cache = {}
-preferences_cache_lock = Lock()
-
 # Database Helper Functions
 def save_preference(team_id, user_id, zoom_config=None, calendar_tool=None):
     conn = psycopg2.connect(os.getenv('DATABASE_URL'))
@@ -443,13 +424,8 @@ def save_preference(team_id, user_id, zoom_config=None, calendar_tool=None):
     conn.commit()
     cur.close()
     conn.close()
-    with preferences_cache_lock:
-        preferences_cache[(team_id, user_id)] = {"zoom_config": new_zoom_config, "calendar_tool": new_calendar_tool}
 
 def load_preferences(team_id, user_id):
-    with preferences_cache_lock:
-        if (team_id, user_id) in preferences_cache:
-            return preferences_cache[(team_id, user_id)]
     try:
         conn = psycopg2.connect(os.getenv('DATABASE_URL'))
         cur = conn.cursor()
@@ -457,7 +433,6 @@ def load_preferences(team_id, user_id):
         row = cur.fetchone()
         if row:
             zoom_config, calendar_tool = row
-            # For jsonb, zoom_config is already a dict; no json.loads needed
             preferences = {
                 "zoom_config": zoom_config if zoom_config else {"mode": "manual", "link": None},
                 "calendar_tool": calendar_tool or "none"
@@ -469,8 +444,6 @@ def load_preferences(team_id, user_id):
     except Exception as e:
         logger.error(f"Failed to load preferences for team {team_id}, user {user_id}: {e}")
         preferences = {"zoom_config": {"mode": "manual", "link": None}, "calendar_tool": "none"}
-    with preferences_cache_lock:
-        preferences_cache[(team_id, user_id)] = preferences
     return preferences
 
 def save_token(team_id, user_id, service, token_data):
@@ -495,65 +468,81 @@ def load_token(team_id, user_id, service):
     return row[0] if row else None
 
 # Utility Functions
-def initialize_workspace_cache(client, team_id):
-    conn = psycopg2.connect(os.getenv('DATABASE_URL'))
-    cur = conn.cursor()
-    cur.execute('SELECT MAX(last_updated) FROM Users WHERE team_id = %s', (team_id,))
-    last_updated_row = cur.fetchone()
-    last_updated = last_updated_row[0] if last_updated_row and last_updated_row[0] else None
-    
-    # Check if cache is fresh (e.g., less than 24 hours old)
-    if last_updated and (datetime.now() - last_updated).total_seconds() < 86400:
-        cur.execute('SELECT user_id, real_name, email, name, is_owner, workspace_name FROM Users WHERE team_id = %s', (team_id,))
-        rows = cur.fetchall()
-        new_cache = {row[0]: {"real_name": row[1], "email": row[2], "name": row[3], "is_owner": row[4], "workspace_name": row[5]} for row in rows}
-        with user_cache_lock:
-            user_cache[team_id] = new_cache
-        with owner_id_lock:
-            owner_id_cache[team_id] = next((user_id for user_id, data in new_cache.items() if data['is_owner']), None)
-    else:
-        # Fetch user data from Slack and update database
-        response = client.users_list()
-        users = response["members"]
-        workspace_name = client.team_info()["team"]["name"]  # Get workspace name from Slack API
-        new_cache = {}
-        for user in users:
-            user_id = user['id']
-            profile = user.get('profile', {})
-            real_name = profile.get('real_name', 'Unknown')
-            name = user.get('name', '')
-            email = f"{name}@gmail.com"  # Placeholder; adjust as needed
-            is_owner = user.get('is_owner', False)
-            new_cache[user_id] = {"real_name": real_name, "email": email, "name": name, "is_owner": is_owner, "workspace_name": workspace_name}
-            cur.execute('''
-                INSERT INTO Users (team_id, user_id, workspace_name, real_name, email, name, is_owner, last_updated)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
-                ON CONFLICT (team_id, user_id) DO UPDATE SET
-                    workspace_name = %s, real_name = %s, email = %s, name = %s, is_owner = %s, last_updated = %s
-            ''', (team_id, user_id, workspace_name, real_name, email, name, is_owner, datetime.now(),
-                  workspace_name, real_name, email, name, is_owner, datetime.now()))
-        conn.commit()
-        with user_cache_lock:
-            user_cache[team_id] = new_cache
-        with owner_id_lock:
-            owner_id_cache[team_id] = next((user_id for user_id, data in new_cache.items() if data['is_owner']), None)
-    cur.close()
-    conn.close()
+def get_all_users(client, channel_id, team_id):
+    try:
+        response = client.conversations_members(channel=channel_id)
+        if response["ok"]:
+            channel_user_ids = set(response["members"])
+            users_response = client.users_list()
+            if users_response["ok"]:
+                users = users_response["members"]
+                return {
+                    user["id"]: {
+                        "Slack Id": user["id"],
+                        "real_name": user.get("real_name", "Unknown"),
+                        "email": user["profile"].get("email", "unknown@gmail.com"),
+                        "name": user.get("name", "Unknown"),
+                        "email_":f"{user.get('name', 'Unknown')}@gmail.com"
+                    }
+                    for user in users if user["id"] in channel_user_ids
+                }
+            else:
+                logger.error(f"Failed to fetch users_list: {users_response['error']}")
+        else:
+            logger.error(f"Failed to fetch channel members: {response['error']}")
+    except Exception as e:
+        logger.error(f"Error fetching users from Slack: {e}")
 
-def get_all_users(team_id):
-    with user_cache_lock:
-        if team_id in user_cache:
-            return {k: {"Slack Id": k, "real_name": v["real_name"], "email": v["email"], "name": v["name"]} 
-                    for k, v in user_cache[team_id].items()}
-    return {}
+    try:
+        channel_info = client.conversations_info(channel=channel_id)
+        if not channel_info["ok"]:
+            logger.error(f"Failed to fetch channel info: {channel_info['error']}")
+            return {}
+        
+
+        conn = psycopg2.connect(os.getenv('DATABASE_URL'))
+        cur = conn.cursor()
+        cur.execute('SELECT user_id, real_name, email, name FROM Users WHERE team_id = %s', (team_id,))
+        rows = cur.fetchall()
+        users = {
+            row[0]: {
+                "Slack Id": row[0],
+                "real_name": row[1] if row[1] else "Unknown",
+                "email": row[2] if row[2] else "unknown@example.com",
+                "name": row[3] if row[3] else "Unknown"
+            }
+            for row in rows
+        }
+        cur.close()
+        conn.close()
+        return users
+    except Exception as e:
+        logger.error(f"Error fetching users from database: {e}")
+        return {}
 
 def get_workspace_owner_id(client, team_id):
-    with owner_id_lock:
-        if team_id in owner_id_cache and owner_id_cache[team_id]:
-            return owner_id_cache[team_id]
-    initialize_workspace_cache(client, team_id)
-    with owner_id_lock:
-        return owner_id_cache.get(team_id)
+    try:
+        response = client.users_list()
+        if response["ok"]:
+            for user in response["members"]:
+                if user.get("is_owner", False):
+                    return user["id"]
+        else:
+            logger.error(f"Failed to fetch users_list for owner: {response['error']}")
+    except Exception as e:
+        logger.error(f"Error fetching users_list for owner: {e}")
+    
+    try:
+        conn = psycopg2.connect(os.getenv('DATABASE_URL'))
+        cur = conn.cursor()
+        cur.execute('SELECT user_id FROM Users WHERE team_id = %s AND is_owner = TRUE', (team_id,))
+        row = cur.fetchone()
+        cur.close()
+        conn.close()
+        return row[0] if row else None
+    except Exception as e:
+        logger.error(f"Error fetching owner from database: {e}")
+        return None
 
 def get_channel_owner_id(client, channel_id):
     try:
@@ -562,14 +551,6 @@ def get_channel_owner_id(client, channel_id):
     except SlackApiError as e:
         logger.error(f"Error fetching channel info: {e.response['error']}")
         return None
-
-def get_user_timezone(client, user_id):
-    try:
-        response = client.users_info(user=user_id)
-        return response["user"].get("tz", "UTC")
-    except SlackApiError as e:
-        logger.error(f"Timezone error: {e.response['error']}")
-        return "UTC"
 
 def get_team_id_from_owner_id(owner_id):
     conn = psycopg2.connect(os.getenv('DATABASE_URL'))
@@ -580,19 +561,10 @@ def get_team_id_from_owner_id(owner_id):
     conn.close()
     return row[0] if row else None
 
-# def get_client_for_team(team_id):
-#     installation = installation_store.find_installation(None, team_id)
-#     if installation:
-#         print(installation)
-#         token = installation['bot_token']
-#         return WebClient(token=token)
-#     return None
-
 def get_owner_selected_calendar(client, team_id):
     owner_id = get_workspace_owner_id(client, team_id)
     if not owner_id:
         return None
-    # Fixed: Pass both team_id and owner_id to load_preferences
     prefs = load_preferences(team_id, owner_id)
     return prefs.get("calendar_tool", "none")
 
@@ -600,64 +572,44 @@ def get_zoom_link(client, team_id):
     owner_id = get_workspace_owner_id(client, team_id)
     if not owner_id:
         return None
-    prefs = load_preferences(team_id,owner_id)
+    prefs = load_preferences(team_id, owner_id)
     return prefs.get('zoom_config', {}).get('link')
 
 def create_home_tab(client, team_id, user_id):
     logger.info(f"Creating home tab for user {user_id}, team {team_id}")
-    
-    # Get workspace owner ID
     workspace_owner_id = get_workspace_owner_id(client, team_id)
     if not workspace_owner_id:
-        logger.warning(f"No workspace owner for team {team_id}")
         blocks = [
             {"type": "header", "text": {"type": "plain_text", "text": "🤖 Welcome to AI Assistant!", "emoji": True}},
-            {"type": "section", "text": {"type": "mrkdwn", "text": "Unable to determine workspace owner. Please contact support."}},
+            {"type": "section", "text": {"type": "mrkdwn", "text": "Unable to determine workspace owner. Please contact support."}}
         ]
         return {"type": "home", "blocks": blocks}
-
-    # Determine if the user is the workspace owner
     is_owner = user_id == workspace_owner_id
-
-    # Base blocks for all users
     blocks = [
         {"type": "header", "text": {"type": "plain_text", "text": "🤖 Welcome to AI Assistant!", "emoji": True}}
     ]
-
-    # Non-owner view
     if not is_owner:
         blocks.extend([
             {"type": "section", "text": {"type": "mrkdwn", "text": "I help manage schedules and meetings! Please wait for the workspace owner to configure the settings."}},
             {"type": "section", "text": {"type": "mrkdwn", "text": "Only the workspace owner can configure the calendar and Zoom settings."}}
         ])
         return {"type": "home", "blocks": blocks}
-
-    # Owner view: Add configuration options
     blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": "I help manage schedules and meetings! Your settings are below."}})
     blocks.append({"type": "divider"})
-
-    # Load preferences and tokens
     prefs = load_preferences(team_id, workspace_owner_id)
     selected_provider = prefs.get("calendar_tool", "none")
     zoom_config = prefs.get("zoom_config", {"mode": "manual", "link": None})
     mode = zoom_config["mode"]
     calendar_token = load_token(team_id, workspace_owner_id, selected_provider) if selected_provider != "none" else None
     zoom_token = load_token(team_id, workspace_owner_id, "zoom") if mode == "automatic" else None
-    logger.info(f"Preferences loaded: {prefs}, Calendar token: {calendar_token}, Zoom token: {zoom_token}")
-
-    # Check Zoom token expiration
     zoom_token_expired = False
     if zoom_token and mode == "automatic":
         expires_at = zoom_token.get("expires_at", 0)
         current_time = time.time()
         zoom_token_expired = current_time >= expires_at
-
-    # Configuration status
     calendar_provider_set = selected_provider != "none"
     calendar_configured = calendar_token is not None if calendar_provider_set else False
     zoom_configured = (zoom_token is not None and not zoom_token_expired) if mode == "automatic" else True
-
-    # Setup prompt if configurations are incomplete
     if not calendar_provider_set or not calendar_configured or not zoom_configured:
         prompt_text = "To start using the app, please complete the following setups:"
         if not calendar_provider_set:
@@ -670,8 +622,6 @@ def create_home_tab(client, team_id, user_id):
             else:
                 prompt_text += "\n- Authenticate with Zoom for automatic mode."
         blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": prompt_text}})
-
-    # Calendar Configuration Section
     blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": "*🗓️ Calendar Configuration*"}})
     blocks.append({
         "type": "section",
@@ -693,14 +643,10 @@ def create_home_tab(client, team_id, user_id):
             }
         }
     })
-
-    # Calendar configuration prompts
     if selected_provider == "none":
         blocks.append({"type": "context", "elements": [{"type": "mrkdwn", "text": "Please select a calendar provider to begin configuration."}]})
     elif not calendar_configured:
         blocks.append({"type": "context", "elements": [{"type": "mrkdwn", "text": f"Please configure your {selected_provider.capitalize()} calendar."}]})
-
-    # Calendar configure button and status
     if selected_provider != "none":
         status = "⚠️ Not Configured" if not calendar_configured else (
             f":white_check_mark: Connected ({calendar_token.get('google_email', 'unknown')})" if selected_provider == "google" else (
@@ -724,8 +670,6 @@ def create_home_tab(client, team_id, user_id):
             },
             {"type": "context", "elements": [{"type": "mrkdwn", "text": status}]}
         ])
-
-    # Zoom Configuration Section
     status = ("⌛ Token Expired" if zoom_token_expired else
               "⚠️ Not Configured" if mode == "automatic" and not zoom_configured else
               "✅ Configured")
@@ -739,8 +683,6 @@ def create_home_tab(client, team_id, user_id):
             ]
         }
     ])
-
-    # Zoom authentication/refresh button
     if mode == "automatic":
         if not zoom_configured and not zoom_token_expired:
             blocks[-1]["elements"].append({
@@ -752,9 +694,8 @@ def create_home_tab(client, team_id, user_id):
             blocks[-1]["elements"].append({
                 "type": "button",
                 "text": {"type": "plain_text", "text": "Refresh Zoom Token", "emoji": True},
-                "action_id": "configure_zoom"  # Same action_id for refresh
+                "action_id": "configure_zoom"
             })
-
     return {"type": "home", "blocks": blocks}
 
 # Intent Classification
@@ -771,6 +712,8 @@ User's Message:
 """)
 from prompt import calender_prompt, general_prompt
 intent_chain = LLMChain(llm=llm, prompt=intent_prompt)
+# intent_chain = LLMChain(llm=llm, prompt=intent_prompt)
+# intent_chain = LLMChain(llm=llm, prompt=intent_prompt)
 
 mentioned_users_prompt = ChatPromptTemplate.from_template("""
 Given the following chat history, identify the Slack user IDs, Names and emails of the users who are mentioned. Mentions can be in the form of <@user_id> (e.g., <@U12345>) or by their names (e.g., "Alice" or "Alice Smith").
@@ -809,27 +752,16 @@ def handle_calendar_provider(ack, body, client, logger):
     user_id = body["user"]["id"]
     team_id = body["team"]["id"]
     owner_id = get_workspace_owner_id(client, team_id)
-    
     if user_id != owner_id:
         client.chat_postMessage(channel=user_id, text="Only the workspace owner can configure the calendar.")
         return
-    
-    # Corrected line: pass both team_id and owner_id (user_id) parameters
     save_preference(team_id, owner_id, calendar_tool=selected_provider)
-    
     client.views_publish(user_id=owner_id, view=create_home_tab(client, team_id, owner_id))
     if selected_provider != "none":
         client.chat_postMessage(channel=owner_id, text=f"Calendar provider updated to {selected_provider.capitalize()}.")
     else:
         client.chat_postMessage(channel=owner_id, text="Calendar provider reset.")
     logger.info(f"Calendar provider updated to {selected_provider} for owner {owner_id}")
-
-import os
-from google_auth_oauthlib.flow import Flow
-
-# Define your scopes and redirect URI (these could also come from env vars if needed)
-SCOPES = ['https://www.googleapis.com/auth/calendar']  # Example scopes
-# OAUTH_REDIRECT_URI = os.getenv('OAUTH_REDIRECT_URI', 'http://localhost:8000/')
 
 @bolt_app.action("configure_gcal")
 def handle_gcal_config(ack, body, client, logger):
@@ -840,13 +772,8 @@ def handle_gcal_config(ack, body, client, logger):
     if user_id != owner_id:
         client.chat_postMessage(channel=user_id, text="Only the workspace owner can configure the calendar.")
         return
-    
-    # Generate and store the state using StateManager
     state = state_manager.create_state(owner_id)
-    print(f"state stored: {state}")
-    store_in_session(owner_id, "gcal_state", state)  # Optional: for additional validation
-    
-    # Construct the client config from environment variables
+    store_in_session(owner_id, "gcal_state", state)
     client_config = {
         "web": {
             "client_id": os.getenv("GOOGLE_CLIENT_ID"),
@@ -857,17 +784,13 @@ def handle_gcal_config(ack, body, client, logger):
             "redirect_uris": [OAUTH_REDIRECT_URI]
         }
     }
-
-    # Set up the OAuth flow using the client config
     flow = Flow.from_client_config(client_config, scopes=SCOPES, redirect_uri=OAUTH_REDIRECT_URI)
     auth_url, _ = flow.authorization_url(
         access_type='offline',
         prompt='consent',
         include_granted_scopes='true',
-        state=state  # Use the state from StateManager
+        state=state
     )
-    
-    # Open the modal with the auth URL
     try:
         client.views_open(
             trigger_id=body["trigger_id"],
@@ -911,19 +834,18 @@ def handle_mscal_config(ack, body, client, logger):
         )
     except Exception as e:
         logger.error(f"Error opening Microsoft auth modal: {e}")
+
 @bolt_app.event("app_mention")
 def handle_mentions(event, say, client, context):
     if event_deduplicator.is_duplicate_event(event):
         logger.info("Duplicate event detected, skipping processing")
         return
-
-    # Ignore messages from bots
     if event.get("bot_id"):
         logger.info("Ignoring message from bot")
         return
-
     user_id = event.get("user")
     channel_id = event.get("channel")
+    
     text = event.get("text", "").strip()
     thread_ts = event.get("thread_ts")
     team_id = context['team_id']
@@ -931,65 +853,62 @@ def handle_mentions(event, say, client, context):
     if not calendar_tool or calendar_tool == "none":
         say("The workspace owner has not configured a calendar yet.", thread_ts=thread_ts)
         return
-
-    # Fetch bot_user_id dynamically from installation
     installation = installation_store.find_installation(team_id=team_id)
     if not installation or not installation.bot_user_id:
         logger.error(f"No bot_user_id found for team {team_id}")
         say("Error: Could not determine bot user ID.", thread_ts=thread_ts)
         return
-    print(f"App mention events")
-    
     bot_user_id = installation.bot_user_id
-    print(f"Bot user id: {bot_user_id}")
     mention = f"<@{bot_user_id}>"
     mentions = list(set(re.findall(r'<@(\w+)>', text)))
     if bot_user_id in mentions:
         mentions.remove(bot_user_id)
     text = text.replace(mention, "").strip()
-
     workspace_owner_id = get_workspace_owner_id(client, team_id)
     timezone = get_user_timezone(client, user_id)
     zoom_link = get_zoom_link(client, team_id)
     zoom_mode = load_preferences(team_id, workspace_owner_id).get("zoom_config", {}).get("mode", "manual")
-
     channel_history = client.conversations_history(channel=channel_id, limit=2).get("messages", [])
     channel_history = format_channel_history(channel_history)
-    intent = intent_chain.run({"history": channel_history, "input": text})
-
+    intent = intent_chain.run({
+    "history": channel_history,
+    "input": text
+})
     relevant_user_ids = get_relevant_user_ids(client, channel_id)
-    all_users = get_all_users(team_id)
+    all_users = get_all_users(client, channel_id,team_id)
     relevant_users = {uid: all_users.get(uid, {"real_name": "Unknown", "email": "unknown@example.com", "name": "Unknown"})
                       for uid in relevant_user_ids}
     user_information = "\n".join([f"{uid}: Name={info['real_name']}, Email={info['email']}, Slack Name={info['name']}"
                                   for uid, info in relevant_users.items() if uid != bot_user_id])
-
-    print(f"User Information: {user_information}\n\nRelevant Users: {relevant_user_ids}\n\n All users: {all_users}")
     mentioned_users_output = mentioned_users_chain.run({"user_information": user_information, "chat_history": channel_history, "current_input": text, 'bob_id': bot_user_id})
-    
     import pytz
-    pst = pytz.timezone('America/Los_Angeles')
+    owner_timezone = get_user_timezone(client, workspace_owner_id, default_tz="America/Los_Angeles")
+    pst = pytz.timezone(owner_timezone)
     current_time_pst = datetime.now(pst)
     formatted_time = current_time_pst.strftime("%Y-%m-%d | %A | %I:%M %p | %Z")
-
     from all_tools import GoogleCalendarEvents, MicrosoftListCalendarEvents
     if calendar_tool == "google":
         calendar_events = GoogleCalendarEvents()._run(team_id, workspace_owner_id)
-        schedule_tools = [tools[i] for i in [0, 1, 4, 6, 12]]
+        formatted_cal_output = format_calendar_events(calendar_events, owner_timezone)
+        # print(f"Formatted Calendars: {formatted_cal_output}")
+        
+        schedule_indices = [0, 4, 6, 12] if zoom_mode == "manual" else [0, 1, 4, 6, 12]
         update_tools = [tools[i] for i in [0, 7, 12]]
         delete_tools = [tools[i] for i in [0, 8, 12]]
+        schedule_tools = [tools[i] for i in schedule_indices]
     elif calendar_tool == "microsoft":
         calendar_events = MicrosoftListCalendarEvents()._run(team_id, workspace_owner_id)
-        schedule_tools = [tools[i] for i in [0, 1, 9, 12]]
+        schedule_indices = [0, 4, 6, 12] if zoom_mode == "manual" else [0, 1, 4, 6, 12]
         update_tools = [tools[i] for i in [0, 10, 12]]
         delete_tools = [tools[i] for i in [0, 11, 12]]
+        schedule_tools = [tools[i] for i in schedule_indices]
     else:
         say("Invalid calendar tool configured.", thread_ts=thread_ts)
         return
-
     calendar_formatting_chain = LLMChain(llm=llm, prompt=calender_prompt)
-    output = calendar_formatting_chain.run({'input': calendar_events, 'admin_id': workspace_owner_id, 'date_time': formatted_time})
-    print(f"MENTIONED USERS:{mentioned_users_output}")
+    output = calendar_formatting_chain.run({'input': formatted_cal_output, 'admin_id': workspace_owner_id, 'date_time': formatted_time, 'timezone':timezone})
+    mentions_history = get_mentions_from_history(client, channel_id, bot_user_id=bot_user_id, limit=5)
+    print(f"Calendar_events: {mentions_history}")
 
     agent_input = {
         'input': f"Here is the input by user: {text} and do not mention <@{bot_user_id}> even tho mentioned in history",
@@ -1005,168 +924,46 @@ def handle_mentions(event, say, client, context):
         'calendar_tool': calendar_tool,
         'date_time': formatted_time,
         'formatted_calendar': output,
-        'team_id': team_id
+        'team_id': team_id,
+        'raw_events':formatted_cal_output,
+        'calendar_events':formatted_cal_output, 
+        "current_date":formatted_time
     }
-
-    mentions = list(set(re.findall(r'<@(\w+)>', text)))
-    if bot_user_id in mentions:
-        mentions.remove(bot_user_id)
-
     schedule_group_exec = create_schedule_channel_agent(schedule_tools)
     update_group_exec = create_update_group_agent(update_tools)
     delete_exec = create_delete_agent(delete_tools)
-
+    print(f"INTENT: {intent}")
+    if intent == "not authorized":
+        say(f"<@{user_id}> You are not authorized to schedule meetings. I've notified the workspace owner.", thread_ts=thread_ts)
+        admin_dm = client.conversations_open(users=workspace_owner_id)
+        prompt = ChatPromptTemplate.from_template("""
+        Hi <@{workspace_owner_id}>, <@{user_id}> attempted to schedule a meeting: {text}
+        Please review and proceed if needed.
+        """)
+        response = LLMChain(llm=llm, prompt=prompt)
+        client.chat_postMessage(
+            channel=admin_dm["channel"]["id"],
+            text=response.run({'text': text, 'workspace_owner_id': workspace_owner_id, 'user_id': user_id})
+        )
+        return
     if intent == "schedule meeting":
         group_agent_input = agent_input.copy()
-        group_agent_input['mentioned_users'] = mentioned_users_output
+        group_agent_input['mentioned_users'] = mentions_history
         response = schedule_group_exec.invoke(group_agent_input)
         say(response['output'])
-        return
     elif intent == "update event":
         group_agent_input = agent_input.copy()
-        group_agent_input['mentioned_users'] = mentioned_users_output
+        group_agent_input['mentioned_users'] = mentions_history
         response = update_group_exec.invoke(group_agent_input)
         say(response['output'])
-        return
     elif intent == "delete event":
         response = delete_exec.invoke(agent_input)
         say(response['output'])
-        return
     elif intent == "other":
         response = llm.predict(general_prompt.format(input=text, channel_history=channel_history))
         say(response)
-        return
     else:
         say("I'm not sure how to handle that request.")
-# @bolt_app.event("app_mention")
-# def handle_mentions(event, say, client, context):
-#     if event_deduplicator.is_duplicate_event(event):
-#         logger.info("Duplicate event detected, skipping processing")
-#         return
-
-#     # Ignore messages from bots
-#     if event.get("bot_id"):
-#         logger.info("Ignoring message from bot")
-#         return
-
-
-#     user_id = event.get("user")
-#     channel_id = event.get("channel")
-#     text = event.get("text", "").strip()
-#     thread_ts = event.get("thread_ts")
-#     team_id = context['team_id']
-#     calendar_tool = get_owner_selected_calendar(client, team_id)
-#     if not calendar_tool or calendar_tool == "none":
-#         say("The workspace owner has not configured a calendar yet.", thread_ts=thread_ts)
-#         return
-
-#     # Fetch bot_user_id dynamically from installation
-#     installation = installation_store.find_installation(team_id=team_id)
-#     if not installation or not installation.bot_user_id:
-#         logger.error(f"No bot_user_id found for team {team_id}")
-#         say("Error: Could not determine bot user ID.", thread_ts=thread_ts)
-#         return
-#     print(f"App mention events")
-    
-#     bot_user_id = installation.bot_user_id
-#     print(f"Bot user id: {bot_user_id}")
-#     mention = f"<@{bot_user_id}>"
-#     mentions = list(set(re.findall(r'<@(\w+)>', text)))
-#     # Use dynamic bot_user_id instead of SLACK_BOT_USER_ID
-#     if bot_user_id in mentions:
-#         mentions.remove(bot_user_id)
-#     text = text.replace(mention, "").strip()
-
-#     workspace_owner_id = get_workspace_owner_id(client, team_id)
-#     timezone = get_user_timezone(client, user_id)
-#     zoom_link = get_zoom_link(client, team_id)
-#     zoom_mode = load_preferences(team_id, workspace_owner_id).get("zoom_config", {}).get("mode", "manual")
-
-#     channel_history = client.conversations_history(channel=channel_id, limit=2).get("messages", [])
-#     channel_history = format_channel_history(channel_history)
-#     intent = intent_chain.run({"history": channel_history, "input": text})
-
-#     relevant_user_ids = get_relevant_user_ids(client, channel_id)
-#     all_users = get_all_users(team_id)
-#     relevant_users = {uid: all_users.get(uid, {"real_name": "Unknown", "email": "unknown@example.com", "name": "Unknown"})
-#                       for uid in relevant_user_ids}
-#     user_information = "\n".join([f"{uid}: Name={info['real_name']}, Email={info['email']}, Slack Name={info['name']}"
-#                               for uid, info in relevant_users.items() if uid != bot_user_id])
-
-#     print(f"User Information: {user_information}\n\nRelevant Users: {relevant_user_ids}\n\n All users: {all_users}")
-#     mentioned_users_output = mentioned_users_chain.run({"user_information": user_information, "chat_history": channel_history,"current_input":text, 'bob_id':bot_user_id})
-
-#     import pytz
-#     pst = pytz.timezone('America/Los_Angeles')
-#     current_time_pst = datetime.now(pst)
-#     formatted_time = current_time_pst.strftime("%Y-%m-%d | %A | %I:%M %p | %Z")
-
-#     from all_tools import GoogleCalendarEvents, MicrosoftListCalendarEvents
-#     if calendar_tool == "google":
-#         calendar_events = GoogleCalendarEvents()._run(team_id, workspace_owner_id)
-#         schedule_tools = [tools[i] for i in [0, 1, 4, 6, 12]]
-#         update_tools = [tools[i] for i in [0, 7, 12]]
-#         delete_tools = [tools[i] for i in [0, 8, 12]]
-#     elif calendar_tool == "microsoft":
-#         calendar_events = MicrosoftListCalendarEvents()._run(team_id, workspace_owner_id)
-#         schedule_tools = [tools[i] for i in [0, 1, 9, 12]]
-#         update_tools = [tools[i] for i in [0, 10, 12]]
-#         delete_tools = [tools[i] for i in [0, 11, 12]]
-#     else:
-#         say("Invalid calendar tool configured.", thread_ts=thread_ts)
-#         return
-
-#     calendar_formatting_chain = LLMChain(llm=llm, prompt=calender_prompt)
-#     output = calendar_formatting_chain.run({'input': calendar_events, 'admin_id': workspace_owner_id, 'date_time': formatted_time})
-#     print(f"MENTIONED USERS:{mentioned_users_output}")
-
-#     agent_input = {
-#     'input': text,
-#     'event_details': str(event),
-#     'target_user_id': user_id,
-#     'timezone': timezone,
-#     'user_id': user_id,
-#     'admin': workspace_owner_id,
-#     'zoom_link': zoom_link,
-#     'zoom_mode': zoom_mode,
-#     'channel_history': channel_history,
-#     'user_information': mentioned_users_output,
-#     'calendar_tool': calendar_tool,
-#     'date_time': formatted_time,
-#     'formatted_calendar': output,
-#     'team_id': team_id  # Added
-# }
-
-#     mentions = list(set(re.findall(r'<@(\w+)>', text)))
-#     if bot_user_id in mentions:
-#         mentions.remove(bot_user_id)
-
-#     schedule_group_exec = create_schedule_channel_agent(schedule_tools)
-#     update_group_exec = create_update_group_agent(update_tools)
-#     delete_exec = create_delete_agent(delete_tools)
-
-#     if intent == "schedule meeting":
-#         group_agent_input = agent_input.copy()
-#         group_agent_input['mentioned_users'] = "See from the history except 'Bob'"
-#         response = schedule_group_exec.invoke(group_agent_input)
-#         say(response['output'])
-#         return
-#     elif intent == "update event":
-#         group_agent_input = agent_input.copy()
-#         group_agent_input['mentioned_users'] = "See from the history except 'Bob'"
-#         response = update_group_exec.invoke(group_agent_input)
-#         say(response['output'])
-#         return
-#     elif intent == "delete event":
-#         response = delete_exec.invoke(agent_input)
-#         say(response['output'])
-#         return
-#     elif intent == "other":
-#         response = llm.predict(general_prompt.format(input=text, channel_history=channel_history))
-#         say(response)
-#         return
-#     else:
-#         say("I'm not sure how to handle that request.")
 
 def format_channel_history(raw_history):
     cleaned_history = []
@@ -1219,7 +1016,7 @@ def handle_messages(body, say, client, context):
     if event.get("bot_id"):
         logger.info("Ignoring message from bot")
         return
-
+    
     user_id = event.get("user")
     text = event.get("text", "").strip()
     channel_id = event.get("channel")
@@ -1228,28 +1025,23 @@ def handle_messages(body, say, client, context):
     calendar_tool = get_owner_selected_calendar(client, team_id)
     channel_info = client.conversations_info(channel=channel_id)
     channel = channel_info["channel"]
-
-    # Fetch bot_user_id dynamically from installation
     installation = installation_store.find_installation(team_id=team_id)
     if not installation or not installation.bot_user_id:
         logger.error(f"No bot_user_id found for team {team_id}")
         say("Error: Could not determine bot user ID.", thread_ts=thread_ts)
         return
     bot_user_id = installation.bot_user_id
-
     if not channel.get("is_im") and f"<@{bot_user_id}>" in text:
         logger.info("Message contains bot mention in non-IM channel, skipping in message handler")
         return
     if not channel.get("is_im") and "thread_ts" not in event:
         logger.info("Message contains bot mention in non-IM channel (not a thread), skipping in message handler")
-
-    if not calendar_tool:
-        say("The workspace owner has not configured a calendar yet.", thread_ts=thread_ts)
-        return
     if not calendar_tool or calendar_tool == "none":
         say("The workspace owner has not configured a calendar yet.", thread_ts=thread_ts)
         return
-    print(f"Message events")
+    if f"<@{bot_user_id}>" in text and not (channel.get("is_im") or channel.get("is_mpim")):
+        logger.info("Message contains bot mention in non-DM channel, skipping in message handler")
+        return
     workspace_owner_id = get_workspace_owner_id(client, team_id)
     is_owner = user_id == workspace_owner_id
     timezone = get_user_timezone(client, user_id)
@@ -1257,8 +1049,10 @@ def handle_messages(body, say, client, context):
     zoom_mode = load_preferences(team_id, workspace_owner_id).get("zoom_config", {}).get("mode", "manual")
     channel_history = client.conversations_history(channel=channel_id, limit=2).get("messages", [])
     channel_history = format_channel_history(channel_history)
-    intent = intent_chain.run({"history": channel_history, "input": text})
-
+    intent = intent_chain.run({
+    "history": channel_history,
+    "input": text,
+})
     if intent == "schedule meeting" and not is_owner and not channel.get("is_group") and not channel.get("is_mpim") and 'thread_ts' not in event:
         admin_dm = client.conversations_open(users=workspace_owner_id)
         prompt = ChatPromptTemplate.from_template("""
@@ -1274,46 +1068,51 @@ def handle_messages(body, say, client, context):
                                 text=response.run({'text': text, 'workspace_owner_id': workspace_owner_id, 'user_id': user_id, 'channel_history': channel_history}))
         say(f"<@{user_id}> I've notified the workspace owner about your meeting request.", thread_ts=thread_ts)
         return
-
     mentions = list(set(re.findall(r'<@(\w+)>', text)))
     if bot_user_id in mentions:
         mentions.remove(bot_user_id)
-
     import pytz
-    pst = pytz.timezone('America/Los_Angeles')
+    owner_timezone = get_user_timezone(client, workspace_owner_id, default_tz="America/Los_Angeles")
+    pst = pytz.timezone(owner_timezone)
     current_time_pst = datetime.now(pst)
     formatted_time = current_time_pst.strftime("%Y-%m-%d | %A | %I:%M %p | %Z")
-
     from all_tools import MicrosoftListCalendarEvents, GoogleCalendarEvents
     if calendar_tool == "google":
-        schedule_tools = [tools[i] for i in [0, 1, 4, 6, 12]]
+        schedule_indices = [0, 4, 6, 12] if zoom_mode == "manual" else [0, 1, 4, 6, 12]
+        
+        schedule_tools = [tools[i] for i in schedule_indices]
         update_tools = [tools[i] for i in [0, 7, 12]]
         delete_tools = [tools[i] for i in [0, 8, 12]]
-        output = calendar_formatting_chain.run({'input': GoogleCalendarEvents()._run(team_id, workspace_owner_id), 'admin_id': workspace_owner_id, 'date_time': formatted_time})
+        calendar_events = GoogleCalendarEvents()._run(team_id, workspace_owner_id)
+        formatted_cal_output = format_calendar_events(calendar_events, owner_timezone)
+        # print(f"Formatted Calendars: {formatted_cal_output}")
+        output = calendar_formatting_chain.run({'input': formatted_cal_output, 'admin_id': workspace_owner_id, 'date_time': formatted_time, 'timezone':timezone})
     elif calendar_tool == "microsoft":
-        schedule_tools = [tools[i] for i in [0, 1, 9, 12]]
+        schedule_indices = [0, 4, 6, 12] if zoom_mode == "manual" else [0, 1, 4, 6, 12]
+        
+        schedule_tools = [tools[i] for i in schedule_indices]
         update_tools = [tools[i] for i in [0, 10, 12]]
         delete_tools = [tools[i] for i in [0, 11, 12]]
-        output = calendar_formatting_chain.run({'input': MicrosoftListCalendarEvents()._run(team_id, workspace_owner_id), 'admin_id': workspace_owner_id, 'date_time': formatted_time})
+        calendar_events = MicrosoftListCalendarEvents()._run(team_id, workspace_owner_id)
+        output = calendar_formatting_chain.run({'input':calendar_events, 'admin_id': workspace_owner_id, 'date_time': formatted_time, 'timezone':timezone})
     else:
         say("Invalid calendar tool configured.", thread_ts=thread_ts)
         return
-
     relevant_user_ids = get_relevant_user_ids(client, channel_id)
-    all_users = get_all_users(team_id)
+    all_users = get_all_users(client, channel_id,team_id)
     relevant_users = {uid: all_users.get(uid, {"real_name": "Unknown", "email": "unknown@example.com", "name": "Unknown"})
                       for uid in relevant_user_ids}
     user_information = "\n".join([f"{uid}: Name={info['real_name']}, Email={info['email']}, Slack Name={info['name']}"
                                   for uid, info in relevant_users.items() if uid != bot_user_id])
-    print(f"All users: {all_users}\n\n Relevant users: {relevant_user_ids}")
     mentioned_users_output = mentioned_users_chain.run({"user_information": user_information, "chat_history": channel_history, "current_input": text, 'bob_id': bot_user_id})
     schedule_exec = create_schedule_agent(schedule_tools)
     update_exec = create_update_agent(update_tools)
     delete_exec = create_delete_agent(delete_tools)
     schedule_group_exec = create_schedule_group_agent(schedule_tools)
     update_group_exec = create_update_group_agent(update_tools)
-    print(f"MENTIONED USERS:{mentioned_users_output}")
     channel_type = channel.get("is_group", False) or channel.get("is_mpim", False)
+    mentions_history = get_mentions_from_history(client, channel_id, bot_user_id=bot_user_id, limit=5)
+    print(f"Calendar_events: {mentions_history}")
     agent_input = {
         'input': f"Here is the input by user: {text} and do not mention <@{bot_user_id}> even tho mentioned in history",
         'event_details': str(event),
@@ -1328,32 +1127,47 @@ def handle_messages(body, say, client, context):
         'calendar_tool': calendar_tool,
         'date_time': formatted_time,
         'formatted_calendar': output,
-        'team_id': team_id
+        'team_id': team_id,
+        'raw_events':formatted_cal_output,
+        'calendar_events':formatted_cal_output, 
+        "current_date":formatted_time
     }
-
-    if intent == "schedule meeting":
+    if intent == "not authorized":
+        say(f"<@{user_id}> You are not authorized to schedule meetings. I've notified the workspace owner.", thread_ts=thread_ts)
+        admin_dm = client.conversations_open(users=workspace_owner_id)
+        prompt = ChatPromptTemplate.from_template("""
+        Hi <@{workspace_owner_id}>, <@{user_id}> attempted to schedule a meeting: {text}
+        Please review and proceed if needed.
+        """)
+        response = LLMChain(llm=llm, prompt=prompt)
+        client.chat_postMessage(
+            channel=admin_dm["channel"]["id"],
+            text=response.run({'text': text, 'workspace_owner_id': workspace_owner_id, 'user_id': user_id})
+        )
+        return
+    elif intent == "schedule meeting":
         if not channel_type and len(mentions) >= 1:
             mentions.append(user_id)
             dm_channel_id = open_group_dm(client, mentions)
             if dm_channel_id:
                 group_agent_input = agent_input.copy()
-                group_agent_input['mentioned_users'] = mentioned_users_output
+                group_agent_input['mentioned_users'] = mentions_history
                 group_agent_input['channel_history'] = channel_history
                 group_agent_input['formatted_calendar'] = output
                 response = schedule_group_exec.invoke(group_agent_input)
                 client.chat_postMessage(channel=dm_channel_id, text=f"Group conversation started by <@{user_id}>\n\n{response['output']}")
-            else :
+            else:
                 say(f"Sorry, I couldn't create the group conversation", thread_ts=thread_ts)
         else:
             if channel_type or 'thread_ts' in event:
                 group_agent_input = agent_input.copy()
                 if 'thread_ts' in event:
                     schedule_group_exec = create_schedule_channel_agent(schedule_tools)
-                    history_response = client.conversations_replies(channel=channel_id, ts=thread_ts, limit=3)
+                    history_response = client.conversations_replies(channel=channel_id, ts=thread_ts, limit=2)
                     channel_history = format_channel_history(history_response.get("messages", []))
                 else:
                     channel_history = format_channel_history(client.conversations_history(channel=channel_id, limit=2).get("messages", []))
-                group_agent_input['mentioned_users'] = mentioned_users_output
+                group_agent_input['mentioned_users'] = mentions_history
                 group_agent_input['channel_history'] = channel_history
                 group_agent_input['formatted_calendar'] = output
                 response = schedule_group_exec.invoke(group_agent_input)
@@ -1366,8 +1180,8 @@ def handle_messages(body, say, client, context):
         agent_input['calendar_events'] = MicrosoftListCalendarEvents()._run(team_id, workspace_owner_id) if calendar_tool == "microsoft" else GoogleCalendarEvents()._run(team_id, workspace_owner_id)
         if channel_type or 'thread_ts' in event:
             group_agent_input = agent_input.copy()
-            channel_history = format_channel_history(client.conversations_history(channel=channel_id, limit=3).get("messages", []))
-            group_agent_input['mentioned_users'] = mentioned_users_output
+            channel_history = format_channel_history(client.conversations_history(channel=channel_id, limit=2).get("messages", []))
+            group_agent_input['mentioned_users'] = mentions_history
             group_agent_input['channel_history'] = channel_history
             group_agent_input['formatted_calendar'] = output
             response = update_group_exec.invoke(group_agent_input)
@@ -1385,33 +1199,65 @@ def handle_messages(body, say, client, context):
         say(response, thread_ts=thread_ts)
     else:
         say("I'm not sure how to handle that request.", thread_ts=thread_ts)
+
+@bolt_app.event("subteam_updated")
+def handle_subteam_updated_events(body, logger, context):
+    event = body.get("event", {})
+    subteam = event.get("subteam", {})
+    subteam_id = subteam.get("id")
+    team_id = context.get("team_id")
+    current_users = set(subteam.get("users", []))
+    date_delete = subteam.get("date_delete", 0)
+
+    logger.info(f"Subteam updated: {subteam_id}, users: {current_users}")
+
+    if date_delete > 0:
+        logger.info(f"Subteam {subteam_id} deactivated")
+        return
+
+    try:
+        conn = psycopg2.connect(os.getenv('DATABASE_URL'))
+        cur = conn.cursor()
+        cur.execute("SELECT user_id FROM SubteamMembers WHERE subteam_id = %s AND team_id = %s", 
+                   (subteam_id, team_id))
+        previous_users = set(row[0] for row in cur.fetchall())
+        removed_users = previous_users - current_users
+        for user_id in removed_users:
+            cur.execute("DELETE FROM SubteamMembers WHERE subteam_id = %s AND user_id = %s AND team_id = %s", 
+                       (subteam_id, user_id, team_id))
+            logger.info(f"Removed user {user_id} from subteam {subteam_id}")
+        for user_id in current_users:
+            cur.execute("""
+                INSERT INTO SubteamMembers (subteam_id, user_id, team_id, last_updated)
+                VALUES (%s, %s, %s, %s)
+                ON CONFLICT (subteam_id, user_id, team_id) DO UPDATE SET last_updated = %s
+            """, (subteam_id, user_id, team_id, datetime.now(), datetime.now()))
+        conn.commit()
+    except psycopg2.Error as e:
+        logger.error(f"Database error: {e}")
+    finally:
+        cur.close()
+        conn.close()
+
 @bolt_app.event("team_join")
 def handle_team_join(event, client, context, logger):
     try:
         user_info = event['user']
         team_id = context.team_id
-        
-        # Fetch workspace name from Slack API
         try:
             team_info = client.team_info()
             workspace_name = team_info['team']['name']
         except SlackApiError as e:
             logger.error(f"Error fetching team info: {e.response['error']}")
             workspace_name = "Unknown Workspace"
-
-        # Extract user details
         user_id = user_info['id']
         real_name = user_info.get('real_name', 'Unknown')
         profile = user_info.get('profile', {})
-        email = profile.get('email', f"{user_info.get('name', 'user')}@example.com")  # Fallback email
+        email = profile.get('email', f"{user_info.get('name', 'user')}@gmail.com")
         name = user_info.get('name', '')
         is_owner = user_info.get('is_owner', False)
-
-        # Connect to database
         conn = psycopg2.connect(os.getenv('DATABASE_URL'))
         cur = conn.cursor()
-        
-        # Insert/update user in Users table
         cur.execute('''
             INSERT INTO Users (team_id, user_id, workspace_name, real_name, email, name, is_owner, last_updated)
             VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
@@ -1423,41 +1269,23 @@ def handle_team_join(event, client, context, logger):
                 is_owner = EXCLUDED.is_owner,
                 last_updated = EXCLUDED.last_updated
         ''', (team_id, user_id, workspace_name, real_name, email, name, is_owner, datetime.now()))
-        
         conn.commit()
         cur.close()
         conn.close()
-        
-        # Update user cache
-        with user_cache_lock:
-            if team_id not in user_cache:
-                user_cache[team_id] = {}
-            user_cache[team_id][user_id] = {
-                "real_name": real_name,
-                "email": f"{name}@gmail.com",
-                "name": name,
-                "is_owner": is_owner,
-                "workspace_name": workspace_name
-            }
-        
-        # Update owner_id_cache if user is owner
-        if is_owner:
-            with owner_id_lock:
-                owner_id_cache[team_id] = user_id
-        
         logger.info(f"Processed team_join event for user {user_id} in team {team_id}")
-    
     except KeyError as e:
         logger.error(f"Missing key in event data: {e}")
     except psycopg2.Error as e:
         logger.error(f"Database error: {e}")
     except Exception as e:
         logger.error(f"Unexpected error handling team_join: {e}")
+
 def open_group_dm(client, users):
     try:
         response = client.conversations_open(users=",".join(users))
-        return response["channel"]["id"] if response["ok"] else (None, "Failed to create group DM")
+        return response["channel"]["id"] if response["ok"] else None
     except SlackApiError as e:
+        logger.error(f"Error opening group DM: {e.response['error']}")
         return None
 
 # Flask Routes
@@ -1476,23 +1304,16 @@ def slack_oauth_redirect():
 @app.route("/oauth2callback")
 def oauth2callback():
     state = request.args.get('state', '')
-    print(f"STATE: {state}")
-    print(f"STATs: {state_manager._states}")
     user_id = state_manager.validate_and_consume_state(state)
     stored_state = get_from_session(user_id, "gcal_state") if user_id else None
-    
     if not user_id or stored_state != state:
         return "Invalid state", 400
-    
     team_id = get_team_id_from_owner_id(user_id)
     if not team_id:
         return "Workspace not found", 404
-    
     client = get_client_for_team(team_id)
     if not client:
         return "Client not found", 500
-    
-    # Construct the client config from environment variables
     client_config = {
         "web": {
             "client_id": os.getenv("GOOGLE_CLIENT_ID"),
@@ -1503,8 +1324,6 @@ def oauth2callback():
             "redirect_uris": [OAUTH_REDIRECT_URI]
         }
     }
-
-    # Set up the OAuth flow using the client config
     flow = Flow.from_client_config(client_config, scopes=SCOPES, redirect_uri=OAUTH_REDIRECT_URI)
     flow.fetch_token(authorization_response=request.url)
     credentials = flow.credentials
@@ -1513,17 +1332,15 @@ def oauth2callback():
     google_email = user_info.get('email', 'unknown@example.com')
     token_data = json.loads(credentials.to_json())
     token_data['google_email'] = google_email
-    
-    save_token(team_id, user_id, 'google', token_data)  # Adjusted to use team_id and user_id
+    save_token(team_id, user_id, 'google', token_data)
     client.views_publish(user_id=user_id, view=create_home_tab(client, team_id, user_id))
-    
     return "Google Calendar connected successfully! You can close this window."
 
 @bolt_app.action("launch_auth")
 def handle_launch_auth(ack, body, logger):
-    ack()  # Acknowledge the action
+    ack()
     logger.info(f"Launch auth triggered by user {body['user']['id']}")
-    # No further action needed since the URL redirect handles the OAuth flow
+
 @app.route("/microsoft_callback")
 def microsoft_callback():
     code = request.args.get("code")
@@ -1546,7 +1363,7 @@ def microsoft_callback():
     if "access_token" not in result:
         return "Authentication failed", 400
     token_data = {"access_token": result["access_token"], "refresh_token": result.get("refresh_token", ""), "expires_at": result["expires_in"] + time.time()}
-    save_token(user_id, 'microsoft', token_data)
+    save_token(team_id, user_id, 'microsoft', token_data)
     client.views_publish(user_id=user_id, view=create_home_tab(client, team_id, user_id))
     return "Microsoft Calendar connected successfully! You can close this window."
 
@@ -1571,7 +1388,6 @@ def zoom_callback():
     if response.status_code == 200:
         token_data = response.json()
         token_data["expires_at"] = time.time() + token_data["expires_in"]
-        # Fixed: Pass all required arguments in correct order
         save_token(team_id, user_id, 'zoom', token_data)
         client.views_publish(user_id=user_id, view=create_home_tab(client, team_id, user_id))
         return "Zoom connected successfully! You can close this window."
@@ -1586,13 +1402,10 @@ def handle_open_zoom_config_modal(ack, body, client, logger):
     if user_id != owner_id:
         client.chat_postMessage(channel=user_id, text="Only the workspace owner can configure Zoom.")
         return
-    
-    # Fixed: Pass both team_id and user_id to load_preferences
     prefs = load_preferences(team_id, user_id)
     zoom_config = prefs.get("zoom_config", {"mode": "manual", "link": None})
     mode = zoom_config["mode"]
     link = zoom_config.get("link", "")
-    
     try:
         client.views_open(
             trigger_id=body["trigger_id"],
@@ -1638,29 +1451,19 @@ def handle_open_zoom_config_modal(ack, body, client, logger):
 
 @bolt_app.action("configure_zoom")
 def handle_zoom_config(ack, body, client, logger):
-    ack()  # Acknowledge the action
+    ack()
     user_id = body["user"]["id"]
     team_id = body["team"]["id"]
-
-    # Ensure only the workspace owner can configure Zoom
     owner_id = get_workspace_owner_id(client, team_id)
     if user_id != owner_id:
         client.chat_postMessage(channel=user_id, text="Only the workspace owner can configure Zoom.")
         return
-
-    # Check if this is a refresh or initial authentication
     zoom_token = load_token(team_id, owner_id, "zoom")
     is_refresh = zoom_token is not None
-
-    # Generate the Zoom OAuth URL
-    state = state_manager.create_state(owner_id)  # Assume this generates a unique state
+    state = state_manager.create_state(owner_id)
     auth_url = f"{ZOOM_OAUTH_AUTHORIZE_API}?response_type=code&client_id={CLIENT_ID}&redirect_uri={quote_plus(ZOOM_REDIRECT_URI)}&state={state}"
-
-    # Set modal text based on the scenario
     modal_title = "Refresh Zoom Token" if is_refresh else "Authenticate with Zoom"
     button_text = "Refresh Zoom Token" if is_refresh else "Authenticate with Zoom"
-
-    # Open a modal with the appropriate text
     try:
         client.views_open(
             trigger_id=body["trigger_id"],
@@ -1692,22 +1495,19 @@ def handle_zoom_config(ack, body, client, logger):
 
 @bolt_app.view("zoom_config_submit")
 def handle_zoom_config_submit(ack, body, client, logger):
-    ack()  # Ensure ack is called before any processing to avoid warnings
+    ack()
     user_id = body["user"]["id"]
     team_id = body["team"]["id"]
     owner_id = get_workspace_owner_id(client, team_id)
     if user_id != owner_id:
-        return  # Early return if not owner; no need to proceed
-    
+        return
     values = body["view"]["state"]["values"]
     mode = values["zoom_mode"]["mode_select"]["selected_option"]["value"]
     link = values["zoom_link"]["link_input"]["value"] if "zoom_link" in values and "link_input" in values["zoom_link"] else None
     zoom_config = {"mode": mode, "link": link if mode == "manual" else None}
-    
-    
     save_preference(team_id, user_id, zoom_config=zoom_config)
-    
     client.views_publish(user_id=user_id, view=create_home_tab(client, team_id, user_id))
+
 @bolt_app.action("launch_zoom_auth")
 def handle_some_action(ack, body, logger):
     ack()
@@ -1719,9 +1519,7 @@ scheduler.start()
 @app.route('/')
 def home():
     return "Hello"
-# @app.route('/ZOOM_verify_a12f2ccf48a647aa8ebc987a249133f8.html')
-# def home():
-#     return render_template('ZOOM_verify_a12f2ccf48a647aa8ebc987a249133f8.html')
+
 port = int(os.getenv('PORT', 10000))
 if __name__ == '__main__':
-    app.run()
+    app.run(port=port)
