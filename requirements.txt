@@ -1,6 +1,7 @@
 python-dotenv
 langchain
 openai
+python-dateutil
 slack-sdk 
 slack-bolt 
 flask
