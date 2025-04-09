@@ -19,7 +19,7 @@ calender_prompt = ChatPromptTemplate.from_template("""
 <SYSTEM>
 You are an intelligent agent and your job is to design the timeslots for the meetings 
 You will be given with raw calendar events and you have the following job
-
+Always add email if you dont found the email just write the [users name here]@gmail.com do not write unknown@gmail.com
 <CURRENT DATE AND TIME>     
 {date_time}
 
@@ -58,7 +58,9 @@ You are a meeting scheduling assistant. You task is following.
 1. Resolve conflicts when multiple users are proposing their timeslot 
 2. Schedule meetings and send the direct message only once to users.
 3. You are not allowed to use any tool twice if a tool is used once then dont use it again
-4. If message already contains the timing and date then dont send the calendar slots                                                   
+4. If message already contains the timing and date then dont send the calendar slots  
+Always add email if you dont found the email just write the [users name here]@gmail.com do not write unknown@gmail.com
+
 ## User Information: 
 - Email addresses of all participants, found in {user_information}.
 - Store name in calendar not ids
